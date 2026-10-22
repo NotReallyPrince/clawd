@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.0.1
+
+- **New logo:** the Bracket Crab, a pixel crab whose claws are code brackets. It's used for the Marketplace icon,
+  the sidebar and tab icon, the status bar and the chat header.
+
 ## 1.0.0
 
 Initial release of **Clawd — Agent Sidebar for Claude Code**: a Copilot-style coding agent in VS Code's secondary
