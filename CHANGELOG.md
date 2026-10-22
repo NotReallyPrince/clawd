@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.0.2
+
+- **Crowned logo:** the Bracket Crab now wears a gold crown with a small gap above its head, and has shaded legs.
+  The light bar across the top of the head is gone.
+- **Sharper small logo:** the sidebar, tab and status bar icons use a simplified crab with bolder brackets and
+  bigger eyes, so it no longer blurs into a blob at 16px.
+
 ## 1.0.1
 
 - **New logo:** the Bracket Crab, a pixel crab whose claws are code brackets. It's used for the Marketplace icon,
