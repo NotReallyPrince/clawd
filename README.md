@@ -1,0 +1,196 @@
+<p align="center">
+  <img src="media/logo.png" width="96" alt="Clawd logo">
+</p>
+
+<h1 align="center">Clawd</h1>
+
+<p align="center">
+  <b>Claude Code in your VS Code sidebar, Copilot-style.</b><br>
+  Chat, watch every step, approve what matters, and keep or undo each change.
+</p>
+
+<p align="center">
+  <img src="https://img.shields.io/badge/VS%20Code-1.94%2B-007ACC?logo=visualstudiocode&logoColor=white" alt="VS Code 1.94+">
+  <img src="https://img.shields.io/badge/powered%20by-Claude%20Code-D97757?logo=anthropic&logoColor=white" alt="Powered by Claude Code">
+  <img src="https://img.shields.io/badge/dependencies-none-2ea043" alt="No dependencies">
+  <img src="https://img.shields.io/badge/use-personal-6e7681" alt="Personal use">
+</p>
+
+<p align="center">
+  <img src="docs/chat.png" width="460" alt="A Clawd chat: steps, a code answer, and the changed files ready to keep or undo">
+</p>
+
+Clawd is a coding agent for VS Code's secondary sidebar, powered by your local **Claude Code CLI** and its login.
+
+Clawd has no API key of its own. Its only direct request is reading your plan usage, with the login Claude Code already has. Everything runs through the `claude` command you already use in the terminal, so sessions, skills, hooks, MCP servers and `CLAUDE.md` are shared with it. A chat started in Clawd shows up in `claude --resume`, and the other way round.
+
+> Personal use only. It runs on your own Claude login and rate limits. If it is ever shared with other people, it must be changed to use each user's own API key.
+
+## Requirements
+
+- VS Code **1.94** or newer
+- [Claude Code](https://docs.anthropic.com/en/docs/claude-code) installed and logged in (run `claude` once in a terminal)
+- Node.js, only to build the `.vsix`
+- Git, for the commit-message button and for undoing changes made by commands
+
+## Install
+
+```bash
+git clone https://github.com/prince-terabits/clawd.git
+cd clawd
+npx --yes @vscode/vsce package
+code --install-extension clawd-*.vsix --force
+```
+
+Then run **Developer: Reload Window**. The Clawd icon appears in the secondary sidebar, on the right. Open it with **Ctrl+Shift+Alt+I** (**Cmd+Shift+Alt+I** on a Mac).
+
+If `claude` is not on your `PATH`, set **Settings → Clawd → Claude Path** to its full path, for example `~/.local/bin/claude`.
+
+### Update
+
+```bash
+cd clawd && git pull
+rm -f *.vsix && npx --yes @vscode/vsce package
+code --install-extension clawd-*.vsix --force
+```
+
+Then reload the window.
+
+## Screenshots
+
+<table>
+  <tr>
+    <td align="center" width="50%"><img src="docs/hero.png" alt="Start screen with recent chats"><br><sub><b>Start screen:</b> recent chats and the current file ready to attach</sub></td>
+    <td align="center" width="50%"><img src="docs/approval.png" alt="Command approval card and todo list"><br><sub><b>Approvals:</b> you decide which commands run; todos track the plan</sub></td>
+  </tr>
+  <tr>
+    <td align="center"><img src="docs/background.png" alt="Background agents and a running server"><br><sub><b>Background work:</b> agents and servers keep running, with their steps nested</sub></td>
+    <td align="center"><img src="docs/usage.png" alt="Plan usage card"><br><sub><b>Usage:</b> your 5-hour and weekly Claude limits at a glance</sub></td>
+  </tr>
+</table>
+
+## Highlights
+
+| | |
+|---|---|
+| 💬 **Several chats at once** | Tabs, a message queue, and chats that come back after a reload |
+| 👀 **Every step visible** | Reads, searches, edits with +/− counts, commands with their full output, sub-agents nested |
+| ✅ **You stay in control** | Approve commands, review or auto-apply edits, Keep or Undo per change, restore any checkpoint |
+| 🧵 **Background tasks** | Servers and agents keep running; Claude follows up when they finish |
+| 🧠 **Same Claude as the terminal** | Your sessions, skills, hooks, MCP servers and `CLAUDE.md`, no API key |
+| ✨ **Git help** | Commit messages from your diff, and Restore also undoes what commands changed |
+
+## Features
+
+### Chat
+
+- **Several chats at once.** Each chat has its own Claude process and its own tab. A tab shows a spinner while it works, a dot when there's a reply you haven't seen, and a bell when it's waiting for your approval. Double-click a tab to rename it.
+- **Chats in editor tabs:** the Clawd icon in any editor's title bar opens a new chat in a tab (also **Clawd: Open in New Tab**); the sidebar's ↗ icon moves the current chat into one. The tab has its own header with the chat title, **History**, **New Chat**, and Rename, Plan usage, Export and Delete under **…**, and it comes back after a reload.
+- **Message queue.** Press Enter while Claude is replying to queue the next message. Queued messages can be edited, removed or sent right away, and they survive a window reload.
+- **Open tabs come back** after a reload.
+- **Notifications** when a chat in the background finishes or needs your approval.
+- **Markdown replies** with syntax-highlighted code blocks and a copy button. File paths become clickable.
+- **Export** a chat as Markdown: copy it, save it, or open it in an editor.
+
+### Context
+
+- The **current file** (and selection) is offered automatically as a suggestion chip.
+- **`@` mentions:** type `@` and part of a file name to attach a file.
+- **Add files and folders** with the **+** button, by **Shift**+dragging from the Explorer, or by right-clicking → *Add to Clawd Chat*.
+- **Add selection:** **Ctrl+Shift+Alt+L**.
+- **Paste images** into the input. Click an image to open it in VS Code.
+- **`/` menu** with all Claude Code commands and your skills.
+
+### Controls
+
+- **Mode:** Agent or Plan. In Plan mode, Claude shows a plan card for you to approve first.
+- **Model** and **effort** pickers.
+- **Approval policy:**
+  - *Review* (default): edits are applied at once and you keep or undo them afterwards; commands ask first.
+  - *Ask*: every edit shows a diff and waits for you. An **Allow all edits in this chat** button stops further asking for that chat.
+  - *Bypass*: nothing asks.
+  - Whatever the policy, an edit that could make something else run commands later always asks: anything under `.git/`, `.claude/`, `.vscode/`, `.husky/`, `.devcontainer/` or `.github/workflows/`, a shell startup file such as `.bashrc`, and any file outside the open folder (symlinks are followed) apart from scratch files in the temp directory. The card says why it asked, and "Allow all edits" doesn't cover these.
+  - Clawd settings can only be set in your user settings, not by a repo's `.vscode/settings.json`.
+- **Context meter:** a ring that shows how full the context window is. Click it to run `/compact`.
+- **Usage in the status bar:** your 5-hour and weekly plan usage. A percentage appears from 70%, yellow at 80% and red at 95%. Click it for details. It refreshes every 2 minutes while VS Code is focused, so usage from other Claude sessions shows up too.
+
+### Watching Claude work
+
+- **Live steps:** reads, searches, edits (with + and − line counts) and commands. Click a step to see the full command, its input and its output. When the reply ends, the steps fold into "N steps in Xs".
+- **Thinking**, a **todo list**, and **images** that tools return (for example screenshots).
+- **Sub-agents:** their steps nest under the Agent step that started them.
+- **Background tasks:** commands and agents that keep running after the reply finishes show in a "Running in background" strip, with elapsed time, **Stop** and **Open output**. When one finishes, Claude follows up on its own.
+
+### Reviewing and undoing changes
+
+- **Keep or Undo** each change from the editor (per change or per file), from the changes panel above the input, or for all files at once.
+- Changed lines are highlighted. Removed lines show as a faded "− was: …" note at the end of the line; hover over it to see the old lines.
+- **Restore checkpoint** on any reply puts back the files changed since that point and makes Claude forget everything after it. This also covers files changed by commands (`sed`, scripts and so on) in a git repo.
+- **Redo** brings a restore back, one step at a time.
+- **Edit a sent message:** click the pencil on it. Clawd restores the checkpoint before it and sends the edited message.
+- **Retry** and **Copy** on every reply.
+
+### History
+
+- **Chat History** lists every Claude Code session for this folder, including the ones started in the terminal.
+- **Search** by title, or by message text once you type 3 or more characters.
+- **Rename** or **delete** a chat. Deleting moves the chat's files to the system trash.
+
+### Browser
+
+Set **`clawd.browser`** to `window` or `headless` and Claude gets its own Chrome to test your app: open a page, read it, click, type, press keys, take screenshots and check the console. In headless mode a **Claude's Browser** tab opens beside the chat with a live view you can click, scroll and type into; run **Clawd: Show Claude's Browser** to open it in window mode too. Each chat gets a throwaway profile that's deleted when it ends, unless you turn on **`clawd.browserKeepLogins`**: then logins stay in a Clawd-only Chrome profile (not your own). Reading the page, screenshots and the console never ask; opening, clicking and typing follow your approval policy. Needs Chrome, Chromium or Edge installed.
+
+### Git
+
+- **Write Commit Message with Clawd** (the ✨ button in Source Control): writes a message from your staged changes (or unstaged ones if nothing is staged) using Haiku, and puts it in the commit box.
+
+## Commands
+
+| Command | Shortcut |
+|---|---|
+| Focus the chat | Ctrl+Shift+Alt+I |
+| Add Selection to Clawd Chat | Ctrl+Shift+Alt+L |
+| New Chat, Chat History, Rename Chat, Delete Chat | |
+| Add Files & Folders to Chat, Add to Clawd Chat | |
+| Keep All Agent Changes, Undo All Agent Changes | |
+| Export Chat as Markdown, Open Chat in Editor, Open in New Tab | |
+| Write Commit Message with Clawd, Show Plan Usage, Show Claude's Browser | |
+
+## Settings
+
+| Setting | Default | What it does |
+|---|---|---|
+| `clawd.claudePath` | `claude` | Path to the Claude Code CLI |
+| `clawd.defaultPolicy` | `review` | Approval policy for new chats: `review`, `ask` or `bypass` |
+| `clawd.browser` | `off` | Browser tools for Claude: `off`, `window` (a visible Chrome) or `headless` |
+| `clawd.browserKeepLogins` | `false` | Keep the browser's logins between chats |
+
+All of them are machine-scoped on purpose: a folder's `.vscode/settings.json` can't change which binary Clawd launches or turn approvals off. Clawd also stays off in Restricted Mode until you trust the folder.
+
+## Known limits
+
+- VS Code only accepts drops onto a webview while **Shift** is held.
+- Editors can't show deleted lines inline, so removed lines appear as an end-of-line note with a hover.
+- Undoing command changes doesn't cover untracked files that already existed, or ignored files. The git snapshots it uses can be cleaned up by git after about two weeks.
+- Queued images are not kept across a reload.
+- Clawd relies on two Claude Code options that aren't listed in `claude --help` (`--resume-session-at` and `--permission-prompt-tool stdio`). The official Agent SDK uses both, but a future CLI update could break them.
+
+## Development
+
+Plain JavaScript with no build step and no npm dependencies. `marked` and the codicons are vendored in `media/vendor/`.
+
+| File | Purpose |
+|---|---|
+| `extension.js` | Extension host: the CLI process, chats, approvals, checkpoints, history |
+| `edits.js` | Keep/Undo review in the editor |
+| `media/chat.js`, `media/chat.css` | The chat UI (webview) |
+| `test/e2e.js` | Tests against the real CLI with a stubbed `vscode` module |
+
+Run the tests from an **empty folder**, because they create files there:
+
+```bash
+mkdir -p /tmp/bs-test && cd /tmp/bs-test
+node /path/to/clawd/test/e2e.js --quick      # no CLI needed
+node /path/to/clawd/test/e2e.js --live-bg    # background tasks, chats, /compact, undo, commit message (about 3 min)
+node /path/to/clawd/test/e2e.js              # full live suite (about 6 min, uses Haiku)
+```

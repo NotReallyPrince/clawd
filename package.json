@@ -1,0 +1,485 @@
+{
+  "name": "clawd",
+  "displayName": "Clawd — Agent Sidebar for Claude Code",
+  "description": "A coding agent in the secondary sidebar, powered by your local Claude Code CLI and its login.",
+  "version": "1.0.0",
+  "publisher": "prince-terabits",
+  "repository": { "type": "git", "url": "https://github.com/prince-terabits/clawd.git" },
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.94.0"
+  },
+  "main": "./extension.js",
+  "activationEvents": [
+    "onStartupFinished",
+    "onWebviewPanel:clawd.chatTab"
+  ],
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": false,
+      "description": "Clawd runs the Claude Code CLI in the open folder, so it stays off until you trust it."
+    }
+  },
+  "contributes": {
+    "chatParticipants": [
+      {
+        "id": "clawd.chat",
+        "name": "clawd",
+        "fullName": "Clawd",
+        "description": "Claude Code: ask, edit, run (drag files in)",
+        "isSticky": true
+      }
+    ],
+    "viewsContainers": {
+      "secondarySidebar": [
+        {
+          "id": "clawdSecondary",
+          "title": "Clawd",
+          "icon": "media/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "clawdSecondary": [
+        {
+          "type": "webview",
+          "id": "clawd.chat",
+          "name": "Clawd"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "clawd.showBrowser",
+        "title": "Show Claude's Browser",
+        "category": "Clawd",
+        "icon": "$(globe)"
+      },
+      {
+        "command": "clawd.newChat",
+        "title": "New Chat",
+        "category": "Clawd",
+        "icon": "$(add)"
+      },
+      {
+        "command": "clawd.manageTools",
+        "title": "MCP Servers & Skills",
+        "category": "Clawd",
+        "icon": "$(plug)"
+      },
+      {
+        "command": "clawd.history",
+        "title": "Chat History",
+        "category": "Clawd",
+        "icon": "$(history)"
+      },
+      {
+        "command": "clawd.addContext",
+        "title": "Add Files & Folders to Chat",
+        "category": "Clawd",
+        "icon": "$(attach)"
+      },
+      {
+        "command": "clawd.addToChat",
+        "title": "Add to Clawd Chat",
+        "category": "Clawd"
+      },
+      {
+        "command": "clawd.addSelection",
+        "title": "Add Selection to Clawd Chat",
+        "category": "Clawd"
+      },
+      {
+        "command": "clawd.keepAll",
+        "title": "Keep All Agent Changes",
+        "category": "Clawd"
+      },
+      {
+        "command": "clawd.undoAll",
+        "title": "Undo All Agent Changes",
+        "category": "Clawd"
+      },
+      {
+        "command": "clawd.showUsage",
+        "title": "Show Plan Usage",
+        "category": "Clawd",
+        "icon": "$(clawd-logo)"
+      },
+      {
+        "command": "clawd.exportChat",
+        "title": "Export Chat as Markdown",
+        "category": "Clawd",
+        "icon": "$(export)"
+      },
+      {
+        "command": "clawd.openInEditor",
+        "title": "Open Chat in Editor",
+        "category": "Clawd",
+        "icon": "$(link-external)"
+      },
+      {
+        "command": "clawd.newChatInEditor",
+        "title": "Open in New Tab",
+        "category": "Clawd",
+        "icon": "$(clawd-logo)"
+      },
+      {
+        "command": "clawd.commitMessage",
+        "title": "Write Commit Message with Clawd",
+        "category": "Clawd",
+        "icon": "$(sparkle)"
+      },
+      {
+        "command": "clawd.openInTerminal",
+        "title": "Open Chat in Terminal",
+        "category": "Clawd",
+        "icon": "$(terminal)"
+      },
+      {
+        "command": "clawd.continueFromTerminal",
+        "title": "Continue in Clawd",
+        "category": "Clawd"
+      },
+      {
+        "command": "clawd.diffHead",
+        "title": "Compare with Last Commit",
+        "category": "Clawd",
+        "icon": "$(git-compare)"
+      },
+      {
+        "command": "clawd.scmKeep",
+        "title": "Keep",
+        "category": "Clawd",
+        "icon": "$(check)"
+      },
+      {
+        "command": "clawd.scmUndo",
+        "title": "Undo",
+        "category": "Clawd",
+        "icon": "$(discard)"
+      },
+      {
+        "command": "clawd.renameChat",
+        "title": "Rename Chat",
+        "category": "Clawd",
+        "icon": "$(edit)"
+      },
+      {
+        "command": "clawd.deleteChat",
+        "title": "Delete Chat",
+        "category": "Clawd",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "clawd.explain",
+        "title": "Explain This",
+        "category": "Clawd"
+      },
+      {
+        "command": "clawd.fix",
+        "title": "Fix This",
+        "category": "Clawd"
+      },
+      {
+        "command": "clawd.tests",
+        "title": "Write Tests for This",
+        "category": "Clawd"
+      },
+      {
+        "command": "clawd.prevChange",
+        "title": "Previous Agent Change",
+        "category": "Clawd",
+        "icon": "$(arrow-up)"
+      },
+      {
+        "command": "clawd.nextChange",
+        "title": "Next Agent Change",
+        "category": "Clawd",
+        "icon": "$(arrow-down)"
+      },
+      {
+        "command": "clawd.keepEditor",
+        "title": "Keep Agent Changes in This File",
+        "category": "Clawd",
+        "icon": "$(check)"
+      },
+      {
+        "command": "clawd.undoEditor",
+        "title": "Undo Agent Changes in This File",
+        "category": "Clawd",
+        "icon": "$(discard)"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "clawd.newChat",
+          "when": "view == clawd.chat",
+          "group": "navigation@1"
+        },
+        {
+          "command": "clawd.history",
+          "when": "view == clawd.chat",
+          "group": "navigation@2"
+        },
+        {
+          "command": "clawd.openInEditor",
+          "when": "view == clawd.chat",
+          "group": "navigation@3"
+        },
+        {
+          "command": "clawd.openInTerminal",
+          "when": "view == clawd.chat",
+          "group": "navigation@3"
+        },
+        {
+          "command": "clawd.renameChat",
+          "when": "view == clawd.chat",
+          "group": "clawd@0"
+        },
+        {
+          "command": "clawd.manageTools",
+          "when": "view == clawd.chat",
+          "group": "navigation@4"
+        },
+        {
+          "command": "clawd.exportChat",
+          "when": "view == clawd.chat",
+          "group": "clawd@2"
+        },
+        {
+          "command": "clawd.deleteChat",
+          "when": "view == clawd.chat",
+          "group": "clawd@1"
+        },
+        {
+          "command": "clawd.diffHead",
+          "when": "view == clawd.chat",
+          "group": "clawd@3"
+        }
+      ],
+      "scm/resourceState/context": [
+        {
+          "command": "clawd.scmKeep",
+          "when": "scmProvider == clawd",
+          "group": "inline"
+        },
+        {
+          "command": "clawd.scmUndo",
+          "when": "scmProvider == clawd",
+          "group": "inline"
+        }
+      ],
+      "scm/resourceGroup/context": [
+        {
+          "command": "clawd.scmKeep",
+          "when": "scmProvider == clawd",
+          "group": "inline"
+        },
+        {
+          "command": "clawd.scmUndo",
+          "when": "scmProvider == clawd",
+          "group": "inline"
+        }
+      ],
+      "editor/title": [
+        {
+          "command": "clawd.newChatInEditor",
+          "when": "activeWebviewPanelId != 'clawd.chatTab'",
+          "group": "navigation@100"
+        },
+        {
+          "command": "clawd.openInTerminal",
+          "when": "activeWebviewPanelId == 'clawd.chatTab'",
+          "group": "navigation@100"
+        },
+        {
+          "command": "clawd.prevChange",
+          "when": "resourcePath in clawd.changed",
+          "group": "navigation@90"
+        },
+        {
+          "command": "clawd.nextChange",
+          "when": "resourcePath in clawd.changed",
+          "group": "navigation@91"
+        },
+        {
+          "command": "clawd.keepEditor",
+          "when": "resourcePath in clawd.changed",
+          "group": "navigation@92"
+        },
+        {
+          "command": "clawd.undoEditor",
+          "when": "resourcePath in clawd.changed",
+          "group": "navigation@93"
+        }
+      ],
+      "scm/title": [
+        {
+          "command": "clawd.commitMessage",
+          "when": "scmProvider == git",
+          "group": "navigation@0"
+        }
+      ],
+      "terminal/title/context": [
+        {
+          "command": "clawd.continueFromTerminal"
+        }
+      ],
+      "explorer/context": [
+        {
+          "command": "clawd.addToChat",
+          "group": "clawd@1"
+        }
+      ],
+      "editor/context": [
+        {
+          "command": "clawd.addSelection",
+          "when": "editorHasSelection",
+          "group": "clawd@1"
+        },
+        {
+          "command": "clawd.explain",
+          "when": "editorHasSelection",
+          "group": "clawd@2"
+        },
+        {
+          "command": "clawd.fix",
+          "when": "editorHasSelection",
+          "group": "clawd@3"
+        },
+        {
+          "command": "clawd.tests",
+          "when": "editorHasSelection",
+          "group": "clawd@4"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "clawd.addToChat",
+          "when": "false"
+        },
+        {
+          "command": "clawd.scmKeep",
+          "when": "false"
+        },
+        {
+          "command": "clawd.scmUndo",
+          "when": "false"
+        }
+      ]
+    },
+    "keybindings": [
+      {
+        "command": "clawd.chat.focus",
+        "key": "ctrl+shift+alt+i",
+        "mac": "cmd+shift+alt+i"
+      },
+      {
+        "command": "clawd.addSelection",
+        "key": "ctrl+shift+alt+l",
+        "mac": "cmd+shift+alt+l",
+        "when": "editorHasSelection"
+      },
+      {
+        "command": "clawd.nextChange",
+        "key": "alt+f5",
+        "when": "editorTextFocus && resourcePath in clawd.changed"
+      },
+      {
+        "command": "clawd.prevChange",
+        "key": "shift+alt+f5",
+        "when": "editorTextFocus && resourcePath in clawd.changed"
+      }
+    ],
+    "configuration": {
+      "title": "Clawd",
+      "properties": {
+        "clawd.browser": {
+          "type": "string",
+          "default": "off",
+          "scope": "machine",
+          "enum": [
+            "off",
+            "window",
+            "headless"
+          ],
+          "enumDescriptions": [
+            "No browser tools",
+            "Give Claude a browser in its own Chrome window you can watch",
+            "Give Claude a browser without a visible window"
+          ],
+          "description": "Clawd's own browser tools: Claude can open pages, read them, click, type, take screenshots and check the console in a separate Chrome. In headless mode a live view opens in a tab; run Clawd: Show Claude's Browser to open it any time. Applies to chats started after the change."
+        },
+        "clawd.browserKeepLogins": {
+          "type": "boolean",
+          "default": false,
+          "scope": "machine",
+          "description": "Keep the browser's cookies and logins between chats, in a Clawd-only Chrome profile (not your own). Off: every chat starts logged out with a throwaway profile. If two chats use the browser at once, the second gets a throwaway profile."
+        },
+        "clawd.autoCompactAt": {
+          "type": "string",
+          "default": "200000",
+          "scope": "machine",
+          "enum": ["150000", "200000", "300000", "500000", "default", "off"],
+          "enumItemLabels": ["150k tokens", "200k tokens", "300k tokens", "500k tokens", "Claude Code default (near the model's limit)", "Off"],
+          "enumDescriptions": [
+            "Compact early: fastest replies, least plan usage",
+            "Recommended: long chats stay quick and cheap",
+            "More history kept before compacting",
+            "Even more history; replies get slower and use more of your plan",
+            "Only when the model's context window is nearly full (about 967k of 1M)",
+            "Never compact on its own; use the context meter to compact by hand"
+          ],
+          "markdownDescription": "When Claude compacts a long chat on its own (summarizes the conversation so far to free up space). It happens at about this size minus a ~33k buffer for the summary, so `200k` compacts near 167k. The context meter fills toward this point. Running chats switch on their next message."
+        },
+        "clawd.diagnostics": {
+          "type": "boolean",
+          "default": true,
+          "scope": "machine",
+          "description": "After each edit, send the errors VS Code reports in that file (Problems panel) back to Claude so it can fix them. Each edit waits up to 1.5 s for the language server."
+        },
+        "clawd.fallbackModel": {
+          "type": "string",
+          "default": "sonnet",
+          "scope": "machine",
+          "enum": ["", "sonnet", "haiku", "opus"],
+          "enumItemLabels": ["Off", "Sonnet", "Haiku", "Opus"],
+          "description": "When the chat's model is overloaded or unavailable, the reply goes on with this model instead of failing. Applies from a chat's next message."
+        },
+        "clawd.claudePath": {
+          "type": "string",
+          "default": "claude",
+          "scope": "machine",
+          "description": "Path to the Claude Code CLI. Machine-scoped: a workspace cannot override which binary is launched."
+        },
+        "clawd.defaultPolicy": {
+          "type": "string",
+          "default": "review",
+          "scope": "machine",
+          "enum": [
+            "review",
+            "ask",
+            "bypass"
+          ],
+          "enumDescriptions": [
+            "Edits apply right away and stay reviewable with Keep / Undo. Commands ask first.",
+            "Every edit asks first with a diff. Commands ask first.",
+            "Nothing asks. Edits stay reviewable with Keep / Undo."
+          ],
+          "description": "Approval policy for new chats (also switchable from the chat box)."
+        }
+      }
+    },
+    "icons": {
+      "clawd-logo": {
+        "description": "Clawd logo",
+        "default": {
+          "fontPath": "media/clawd-icons.woff",
+          "fontCharacter": "\\E000"
+        }
+      }
+    }
+  },
+  "icon": "media/logo.png"
+}

@@ -1,0 +1,1817 @@
+const vscode = acquireVsCodeApi();
+const $ = (sel, root = document) => root.querySelector(sel);
+
+// ---------- tiny DOM helper ----------
+function h(tag, props = {}, ...kids) {
+  const el = document.createElement(tag);
+  for (const [k, v] of Object.entries(props)) {
+    if (v == null || v === false) continue;
+    if (k === "class") el.className = v;
+    else if (k.startsWith("on")) el.addEventListener(k.slice(2), v);
+    else if (k === "html") el.innerHTML = v;
+    else if (k === "style") el.style.cssText = v; // the CSP blocks style attributes, not CSSOM
+    else el.setAttribute(k, v === true ? "" : v);
+  }
+  for (const kid of kids.flat()) if (kid != null && kid !== false) el.append(kid instanceof Node ? kid : document.createTextNode(String(kid)));
+  if (tag === "button" && props.title && !props["aria-label"] && !el.textContent.trim()) el.setAttribute("aria-label", props.title); // icon-only buttons
+  return el;
+}
+const icon = (name, cls = "") => h("i", { class: `codicon codicon-${name} ${cls}` });
+const logo = (cls = "") => h("i", { class: `bs-logo ${cls}`, "aria-hidden": "true" });
+const base = (p) => p.split(/[\\/]/).filter(Boolean).pop() || p;
+const dir = (p) => p.split("/").slice(0, -1).join("/");
+const send = (msg) => vscode.postMessage({ chat: cur?.key, ...msg }); // the chat on screen, or the one a queued message belongs to
+
+// ---------- markdown ----------
+const escapeHtml = (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+const FILE_EXT = /\.(jsx?|tsx?|mjs|cjs|py|json|md|css|scss|less|html?|xml|ya?ml|toml|txt|sh|go|rs|java|kt|rb|php|c|cc|cpp|h|hpp|cs|swift|vue|svelte|sql|ini|cfg|conf|env|lock|csv|svg|png|jpe?g|gif|webp|ipynb|dart|lua|r|scala|gradle)$/i;
+const looksLikePath = (s) => s.length < 160 && !/\s/.test(s) && (/^[\w@.~-]*\/[\w@.\/-]+(:\d+)?$/.test(s) || FILE_EXT.test(s.replace(/:\d+$/, "")));
+marked.use({
+  gfm: true,
+  breaks: false,
+  renderer: {
+    html: ({ text }) => escapeHtml(text),
+    code: ({ text, lang }) =>
+      `<div class="codeblock" data-lang="${escapeHtml(lang || "")}"><div class="codebar"><span class="grow">${escapeHtml(lang || "")}</span><button class="icon-btn insert-code" title="Insert at cursor"><i class="codicon codicon-insert"></i></button><button class="icon-btn apply-code" title="Apply to file: Claude makes the edit"><i class="codicon codicon-wand"></i></button><button class="icon-btn copy-code" title="Copy"><i class="codicon codicon-copy"></i></button></div><pre><code>${highlight(text, lang)}</code></pre></div>`,
+    codespan: ({ text }) => {
+      const raw = text; // marked passes code text unescaped
+      if (looksLikePath(raw)) {
+        const [file, ln] = raw.split(":"), line = /^\d+$/.test(ln || "") ? ln : "";
+        return `<span class="chip file-link" data-file="${escapeHtml(file)}" data-line="${line}" title="${escapeHtml(raw)}"><i class="codicon codicon-file"></i>${escapeHtml(base(file))}${line ? `:${line}` : ""}</span>`;
+      }
+      return `<code>${escapeHtml(raw)}</code>`;
+    },
+    // only web and mail links are clickable; anything else (command:, file:, javascript:) stays plain text
+    link: ({ href, text }) => /^(https?:|mailto:)/i.test(href || "") ? `<a href="${escapeHtml(href)}" title="${escapeHtml(href)}">${escapeHtml(text)}</a>` : escapeHtml(text),
+  },
+});
+const md = (text) => marked.parse(text || "");
+
+// Small highlighter for code blocks: comments, strings, numbers, keywords, calls and markup tags. No dependency;
+// ponytail: regex tokens, not a grammar. Swap in a real highlighter if a language reads badly.
+const KEYWORDS = new Set(("if else elif for while do return function const let var class new this import from export default async await try catch " +
+  "finally throw raise def in not and or is None True False lambda with as pass yield self super public private protected static void " +
+  "int float double string bool boolean true false null undefined nil typeof instanceof extends implements interface type enum struct " +
+  "fn pub use mod match impl where package func go defer case switch break continue then fi done esac local echo select insert update " +
+  "delete create table where values set into join on order by group having limit").split(" "));
+const HASH_COMMENTS = /^(py|python|sh|bash|zsh|shell|console|yaml|yml|toml|rb|ruby|r|perl|pl|dockerfile|make|makefile|ini|conf|cfg|properties|env)$/i;
+function highlight(code, lang = "") {
+  if (code.length > 60000 || /^(text|txt|plain|output|log)$/i.test(lang)) return escapeHtml(code);
+  const markup = /^(html?|xml|svg|vue|jsx|tsx|qweb)$/i.test(lang);
+  const hash = HASH_COMMENTS.test(lang), dashes = /^(sql|lua|haskell|hs)$/i.test(lang);
+  // groups: 1 # comment, 2 -- comment, 3 other comments, 4 string, 5 tag, 6 number, 7 call, 8 word
+  const re = /(#[^\n]*)|(--[^\n]*)|(\/\/[^\n]*|\/\*[\s\S]*?\*\/|<!--[\s\S]*?-->)|("(?:\\.|[^"\\\n])*"|'(?:\\.|[^'\\\n])*'|`(?:\\.|[^`\\])*`)|(<\/?[\w:.-]+)|(\b\d[\d_.]*(?:e[+-]?\d+)?\b)|([A-Za-z_$][\w$]*)(?=\s*\()|([A-Za-z_$][\w$-]*)/g;
+  let out = "", at = 0, m;
+  while ((m = re.exec(code))) {
+    const [all, hashC, dashC, c, str, tag, num, call, word] = m;
+    if ((hashC && !hash) || (dashC && !dashes) || (tag && !markup)) { re.lastIndex = m.index + 1; continue; } // not a comment/tag in this language
+    out += escapeHtml(code.slice(at, m.index));
+    at = m.index + all.length;
+    const cls = hashC || dashC || c ? "c" : str ? "s" : tag ? "t" : num ? "n" : call ? (KEYWORDS.has(call) ? "k" : "f") : KEYWORDS.has(word) ? "k" : "";
+    out += cls ? `<span class="tk-${cls}">${escapeHtml(all)}</span>` : escapeHtml(all);
+  }
+  return out + escapeHtml(code.slice(at));
+}
+
+// ---------- state ----------
+const S = {
+  models: [], commands: [], model: "default", effort: "", mode: "agent", policy: "review",
+  active: null, useActive: true, items: [], images: [], busy: false, last: null, todos: [], sessions: [], pinned: [],
+};
+let turn = null; // the response being streamed into
+let nextCheckpoint = 1;
+let redo = null; // { stack: [removed nodes, newest last], bar } so Redo can put messages back, one restore at a time
+
+// Open chats. Each has its own pane and turn state; `shown` is on screen, `cur` is the one messages are applied to.
+const chats = new Map();
+let shown = null, cur = null, scroll = null;
+let synced = false; // the extension sent its chats; until then, don't report an (empty) queue over its saved one
+
+// ---------- layout ----------
+const tabsBar = h("div", { class: "chat-tabs hidden", role: "tablist" });
+const empty = h("div", { class: "empty" });
+const recentPanel = h("div", { class: "recent hidden" });
+const tasksPanel = h("div", { class: "panel tasks hidden" });
+const todosPanel = h("div", { class: "panel todos hidden" });
+const changesPanel = h("div", { class: "panel changes hidden" });
+const chips = h("div", { class: "chips" });
+const input = h("textarea", { rows: 1, placeholder: "Ask Clawd to build, fix or explain…" });
+const slash = h("div", { class: "menu slash hidden" });
+const sendBtn = h("button", { class: "send", title: "Send (Enter)", onclick: () => submit() }, icon("send"));
+const stopBtn = h("button", { class: "send stop hidden", title: "Stop", onclick: () => stop() }, icon("debug-stop"));
+const queuePanel = h("div", { class: "queue hidden" });
+const meterBtn = h("button", { class: "context-meter hidden", onclick: () => compact() });
+const modeBtn = h("button", { class: "pill" });
+const modelBtn = h("button", { class: "pill" });
+const policyBtn = h("button", { class: "pill subtle" });
+const dropOverlay = h("div", { class: "drop" }, icon("cloud-upload"), h("span", {}, "Drop to attach files, folders or images"));
+
+const editBar = h("div", { class: "edit-bar hidden" }, icon("edit"), h("span", { class: "grow ellipsis" }, "Editing message · Send replaces it and its reply"),
+  h("button", { class: "icon-btn", title: "Cancel edit (Esc)", onclick: () => cancelEdit() }, icon("close")));
+
+const box = h("div", { class: "box" },
+  dropOverlay, editBar, chips, input, slash,
+  h("div", { class: "toolbar" }, modeBtn, modelBtn, h("span", { class: "grow" }), meterBtn, sendBtn, stopBtn),
+);
+const composer = h("div", { id: "composer" }, recentPanel, tasksPanel, todosPanel, queuePanel, changesPanel, box,
+  h("div", { class: "footer" }, policyBtn, h("span", { class: "grow" }), h("span", { class: "muted hint", title: "VS Code doesn't let panels like this one take drops (on Windows and macOS, holding Shift while dropping works). To drag files from the Explorer, use @clawd in the Chat panel: the same chat, opened here with Continue in Clawd. Or right-click files in the Explorer → Add to Clawd Chat." }, "/ for commands · drag files into @clawd")));
+// In an editor tab VS Code's title bar is far away, so the tab gets its own header: title, history, new chat, more.
+const inTab = "tab" in document.body.dataset;
+const headTitle = h("span", { class: "ellipsis head-title", title: "Double-click to rename", ondblclick: () => send({ type: "renameChat" }) }, "New chat");
+const MORE = [
+  { value: "renameChat", label: "Rename", icon: "edit" },
+  { value: "usage", label: "Plan usage", icon: "pulse" },
+  { value: "exportChat", label: "Export as Markdown", icon: "export" },
+  { value: "diffHead", label: "Compare with last commit", icon: "git-compare" },
+  { value: "deleteChat", label: "Delete", icon: "trash" },
+];
+const moreBtn = h("button", { class: "icon-btn", title: "More", onclick: () => menu(moreBtn, null, MORE, null, (v) => {
+  if (v !== "usage") return send({ type: v });
+  send({ type: "refreshUsage" }); renderUsage(); usageCard.classList.remove("hidden");
+}) }, icon("ellipsis"));
+const tabHead = inTab && h("div", { class: "tab-head" }, headTitle,
+  h("button", { class: "icon-btn", title: "Chat history", onclick: () => send({ type: "history" }) }, icon("history")),
+  h("button", { class: "icon-btn", title: "New chat", onclick: () => send({ type: "newChat" }) }, icon("add")),
+  moreBtn);
+$("#app").append(...(inTab ? [tabHead] : []), tabsBar, composer);
+
+// ---------- dropdown menus ----------
+let openMenu = null;
+function closeMenu() { openMenu?.remove(); openMenu = null; }
+document.addEventListener("mousedown", (e) => { if (openMenu && !openMenu.contains(e.target)) closeMenu(); });
+// Rows: {value, label, icon?, description?, title? (tooltip), hint? (muted, right)}, {sep: true}, or a row with
+// sub: {options, current, onPick} that opens a submenu beside it.
+function menuItems(el, options, current, onPick) {
+  return options.map((o) => {
+    if (o.sep) return h("div", { class: "menu-sep" });
+    if ("toggle" in o) { // a switch: flips in place, the menu stays open
+      const sw = h("span", { class: `switch ${o.toggle ? "on" : ""}` });
+      return h("div", { class: "menu-item toggle", title: o.title || "",
+        onmouseenter: () => openSub(el, null, null),
+        onclick: () => o.onToggle(sw.classList.toggle("on")) },
+        h("div", { class: "menu-text" }, h("div", {}, o.icon && icon(o.icon), o.label)), sw);
+    }
+    const row = h("div", { class: `menu-item ${o.value === current ? "selected" : ""}`, title: o.title || "",
+      onmouseenter: () => openSub(el, row, o.sub),
+      onclick: () => { if (o.sub) return openSub(el, row, o.sub); closeMenu(); onPick(o.value); } },
+      h("span", { class: "check" }, o.value === current ? icon("check") : null),
+      h("div", { class: "menu-text" }, h("div", {}, o.icon && icon(o.icon), o.label), o.description && h("div", { class: "muted small" }, o.description)),
+      (o.hint || o.sub) && h("span", { class: "menu-hint muted" }, o.hint || "", o.sub && icon("chevron-right")));
+    return row;
+  });
+}
+function openSub(el, row, sub) {
+  el.querySelector(":scope > .menu.sub")?.remove();
+  if (!sub) return;
+  const s = h("div", { class: "menu sub" });
+  s.append(...menuItems(s, sub.options, sub.current, sub.onPick));
+  el.append(s);
+  const r = el.getBoundingClientRect(); // beside the menu; in a narrow sidebar, as far right as fits; never off the bottom
+  s.style.top = Math.max(6 - r.top, Math.min(row.offsetTop - 5, window.innerHeight - 6 - s.offsetHeight - r.top)) + "px";
+  s.style.left = Math.min(r.width + 4, window.innerWidth - 6 - s.offsetWidth - r.left) + "px";
+}
+function menu(anchor, title, options, current, onPick) {
+  closeMenu();
+  const el = h("div", { class: "menu" }, title && h("div", { class: "menu-title" }, title));
+  el.append(...menuItems(el, options, current, onPick));
+  document.body.append(el);
+  const r = anchor.getBoundingClientRect();
+  el.style.left = Math.max(6, Math.min(r.left, window.innerWidth - el.offsetWidth - 6)) + "px";
+  el.style.bottom = window.innerHeight - r.top + 4 + "px";
+  if (el.getBoundingClientRect().top < 6) { el.style.bottom = ""; el.style.top = r.top + 4 + "px"; } // no room above: open below
+  openMenu = el;
+}
+
+// Right-click in the chat: actions for what's under the pointer, instead of the webview's Cut/Copy/Paste
+// (its Copy can't reach the clipboard here). Text boxes keep the native menu.
+document.addEventListener("contextmenu", (e) => {
+  if (e.target.closest("textarea, input")) return;
+  e.preventDefault();
+  const sel = getSelection().toString(), turn = e.target.closest(".turn"), user = e.target.closest(".user-msg");
+  const code = e.target.closest(".codeblock")?.querySelector("code");
+  const edit = user && $(".edit-btn", user), answer = !user && turn?.querySelector('.msg-actions [title="Copy answer"]');
+  const retry = turn?.querySelector('.msg-actions [title="Retry this message"]');
+  const opts = [
+    sel && { label: "Copy", icon: "copy", value: () => send({ type: "copy", text: sel }) },
+    code && { label: "Copy code", icon: "code", value: () => send({ type: "copy", text: code.textContent }) },
+    user && { label: "Copy message", icon: "copy", value: () => { const text = $(".user-text", user).textContent; copied = { text, images: user.images || [] }; send({ type: "copy", text }); } },
+    edit && !S.busy && { label: "Edit message", icon: "edit", value: () => edit.click() },
+    answer && { label: "Copy answer", icon: "copy", value: () => answer.click() },
+    retry && !S.busy && { label: "Retry", icon: "refresh", value: () => retry.click() },
+    { label: "Find in chat", icon: "search", value: openFind },
+  ].filter(Boolean);
+  menu({ getBoundingClientRect: () => ({ left: e.clientX, top: e.clientY }) }, "", opts, null, (f) => f());
+});
+
+const MODES = [
+  { value: "agent", label: "Agent", icon: "hubot", description: "Edits files and runs commands; plans first when the task is big" },
+  { value: "ask", label: "Ask", icon: "comment-discussion", description: "Answers questions about your code, no edits or commands" },
+];
+// the built-in modes, then .github/agents/*.agent.md from the folder and the user profile
+const allModes = () => [...MODES, ...(S.agents || []).map((a) => ({ ...a, icon: "person" }))];
+const POLICIES = [
+  { value: "review", label: "Review edits", icon: "shield", description: "Edits apply now, Keep or Undo later. Commands ask." },
+  { value: "ask", label: "Ask before edits", icon: "question", description: "Every edit asks first, with a diff" },
+  { value: "bypass", label: "Bypass approvals", icon: "warning", description: "Nothing asks. Edits stay undoable." },
+];
+const EFFORT_LABEL = { "": "Default", low: "Low", medium: "Medium", high: "High", xhigh: "Extra high", max: "Max" };
+const effortLevels = () => currentModel().supportedEffortLevels || [];
+
+function setSetting(key, value) {
+  S[key] = value;
+  send({ type: "setting", key, value });
+  renderToolbar();
+}
+
+function currentModel() {
+  return S.models.find((m) => m.value === S.model) || { value: S.model, displayName: S.model };
+}
+
+function renderToolbar() {
+  const mode = allModes().find((m) => m.value === S.mode) || MODES[0];
+  modeBtn.replaceChildren(icon(mode.icon), mode.label, icon("chevron-down", "chev"));
+  const model = currentModel();
+  const name = model.value === "default" && model.description ? model.description.split(" · ")[0] : (model.displayName || model.value);
+  modelBtn.replaceChildren(name, S.effort && h("span", { class: "muted" }, EFFORT_LABEL[S.effort] || S.effort),
+    S.ultracode ? h("span", { class: "muted", title: "Ultracode on" }, icon("rocket")) : "", icon("chevron-down", "chev"));
+  const policy = POLICIES.find((p) => p.value === S.policy) || POLICIES[0];
+  policyBtn.replaceChildren(icon(policy.icon), policy.label, icon("chevron-down", "chev"));
+  policyBtn.classList.toggle("danger", S.policy === "bypass");
+}
+// Copilot-style: plain names (descriptions on hover), Agent, then Ask and the custom agents, then Configure
+modeBtn.onclick = () => {
+  const plain = (m) => ({ value: m.value, label: m.label, title: m.description });
+  const [agent, ...rest] = allModes();
+  menu(modeBtn, "", [plain(agent), { sep: true }, ...rest.map(plain), { sep: true }, { value: "configure", label: "Configure Custom Agents…" }], S.mode,
+    (v) => v === "configure" ? send({ type: "configureAgents" }) : setSetting("mode", v));
+};
+// Like Claude's model menu: the latest of each family, Effort, then older models under More models
+const MAIN_MODELS = ["fable", "opus", "sonnet", "haiku"];
+modelBtn.onclick = () => {
+  const ms = S.models.length ? S.models : [{ value: "default", displayName: "Default" }];
+  let main = ms.filter((m) => MAIN_MODELS.includes(m.value)).sort((a, b) => MAIN_MODELS.indexOf(a.value) - MAIN_MODELS.indexOf(b.value));
+  if (!main.length) main = ms;
+  const family = (m) => { const i = MAIN_MODELS.findIndex((f) => m.value.includes(f)); return i < 0 ? 9 : i; };
+  const more = ms.filter((m) => m.value !== "default" && !main.includes(m)).sort((a, b) => family(a) - family(b));
+  const def = ms.find((m) => m.value === "default")?.resolvedModel; // "Default" shows as the model it stands for
+  const cur = S.model === "default" ? main.find((m) => m.resolvedModel === def)?.value || "default" : S.model;
+  const pick = (v) => {
+    setSetting("model", v);
+    if (S.effort && !effortLevels().includes(S.effort)) setSetting("effort", "");
+  };
+  const levels = effortLevels();
+  menu(modelBtn, "", [
+    ...main.map((m) => ({ value: m.value, label: m.displayName || m.value, description: m.description })),
+    levels.length && { sep: true },
+    levels.length && { value: "effort", label: "Effort", hint: EFFORT_LABEL[S.effort] || S.effort, sub: {
+      options: ["", ...levels].map((v) => ({ value: v, label: EFFORT_LABEL[v] || v, title: v ? "" : "Use the model's default" })),
+      current: S.effort, onPick: (v) => setSetting("effort", v) } },
+    // the CLI's `ultracode` setting: big tasks run as multi-agent workflows, at any effort
+    { value: "ultracode", label: "Ultracode", icon: "rocket", title: "Big tasks run as several agents in parallel (uses many more tokens)",
+      toggle: !!S.ultracode, onToggle: (on) => setSetting("ultracode", on) },
+    more.length && { sep: true },
+    more.length && { value: "more", label: "More models", sub: {
+      options: more.map((m) => ({ value: m.value, label: m.displayName || m.value, title: m.description })), current: cur, onPick: pick } },
+  ].filter(Boolean), cur, pick);
+};
+policyBtn.onclick = () => menu(policyBtn, "Approvals", POLICIES, S.policy, (v) => setSetting("policy", v));
+
+// ---------- context chips ----------
+const kindIcon = (k) => (k === "folder" ? "folder" : k === "selection" ? "list-selection" : "file");
+function chip(item, { onRemove, suggested, onToggle, off } = {}) {
+  const label = base(item.rel) + (item.range ? `:${item.range}` : "");
+  return h("span", { class: `chip ${suggested ? "suggested" : ""} ${off ? "off" : ""}`, title: item.rel + (suggested ? " · current file: click to attach it, the eye includes or excludes it" : "") },
+    h("span", { class: "chip-main", onclick: () => send(suggested ? { type: "pinActive" } : { type: "open", file: item.file || item.rel }) }, icon(kindIcon(item.kind)), label),
+    onToggle && h("button", { class: "icon-btn", title: off ? "Include current file" : "Exclude current file", onclick: onToggle }, icon(off ? "eye-closed" : "eye")),
+    onRemove && h("button", { class: "icon-btn", title: "Remove", onclick: onRemove }, icon("close")));
+}
+
+// The current file (or its selection) already attached as a chip (dropped, picked, clicked or right-clicked) shows once, as the attachment.
+function activeIsAttached() {
+  const a = S.active;
+  if (a?.selection) return S.items.some((i) => i.kind === "selection" && i.file === a.file && i.start === a.selection.start && i.end === a.selection.end);
+  return !!a && S.items.some((i) => i.kind === "file" && (i.file === a.file || i.rel === a.rel));
+}
+
+function renderChips() {
+  const kids = [h("button", { class: "icon-btn attach", title: "Add files & folders (or drag them into @clawd in the Chat panel)", onclick: () => send({ type: "pickContext" }) }, icon("add"))];
+  if (S.active && !activeIsAttached()) {
+    const a = S.active;
+    kids.push(chip({ kind: "file", rel: a.rel, file: a.file, range: a.selection ? `${a.selection.start}-${a.selection.end}` : "" }, { suggested: true, off: !S.useActive, onToggle: () => { S.useActive = !S.useActive; renderChips(); } }));
+  }
+  S.items.forEach((it, i) => kids.push(chip(it, { onRemove: () => { S.items.splice(i, 1); renderChips(); } })));
+  S.images.forEach((img, i) => kids.push(imageChip(img, i + 1, () => { S.images.splice(i, 1); hidePreview(); renderChips(); })));
+  chips.replaceChildren(...kids);
+  saveDraft();
+}
+
+// The unsent message (text, files, images) survives a window reload: the extension keeps it per chat.
+let draftTimer;
+function saveDraft() {
+  clearTimeout(draftTimer);
+  draftTimer = setTimeout(() => {
+    if (!synced || !shown) return;
+    const d = shown.editing?.prev || { text: input.value, items: S.items, images: S.images }; // not the message being edited
+    const msg = { text: d.text, items: d.items, images: d.images.map(({ mediaType, data }) => ({ mediaType, data })) };
+    const json = JSON.stringify(msg);
+    if (json !== shown.savedDraft) vscode.postMessage({ chat: shown.key, type: "draft", ...msg });
+    shown.savedDraft = json;
+  }, 500);
+}
+
+function addItems(items) {
+  for (const it of items) if (!S.items.some((x) => x.rel === it.rel && x.kind === it.kind && x.start === it.start)) S.items.push({ ...it, range: it.kind === "selection" ? `${it.start}-${it.end}` : "" });
+  renderChips();
+  input.focus();
+}
+
+// Pasted images sit in the chip row as "Pasted Image" chips, with a large preview on hover.
+function imageChip(img, n, onRemove) {
+  const el = h("span", { class: "chip image-chip" },
+    onRemove && h("button", { class: "icon-btn", title: "Remove image", onclick: onRemove }, icon("close")),
+    h("img", { class: "chip-thumb", src: img.url, alt: "" }),
+    h("span", { class: "chip-main" }, n > 1 ? `Pasted Image ${n}` : "Pasted Image"));
+  el.title = "Open image";
+  el.addEventListener("click", (e) => { if (!e.target.closest(".icon-btn")) { hidePreview(); send({ type: "openImage", mediaType: img.mediaType, data: img.data }); } });
+  el.addEventListener("mouseenter", () => showPreview(el, img.url));
+  el.addEventListener("mouseleave", hidePreview);
+  return el;
+}
+
+const preview = h("div", { class: "img-preview hidden" }, h("img", { alt: "Pasted image preview" }));
+document.body.append(preview);
+function showPreview(anchor, url) {
+  preview.firstChild.src = url;
+  preview.classList.remove("hidden");
+  const r = anchor.getBoundingClientRect();
+  const w = preview.offsetWidth, ht = preview.offsetHeight;
+  preview.style.left = Math.max(6, Math.min(r.left, window.innerWidth - w - 6)) + "px";
+  preview.style.top = (r.top - ht - 6 >= 6 ? r.top - ht - 6 : Math.min(r.bottom + 6, window.innerHeight - ht - 6)) + "px";
+}
+function hidePreview() {
+  preview.classList.add("hidden");
+}
+
+function drawThumbs() {
+  renderChips();
+}
+
+function addImageFile(file) {
+  const reader = new FileReader();
+  reader.onload = () => {
+    const url = reader.result;
+    S.images.push({ mediaType: file.type, data: url.slice(url.indexOf(",") + 1), url });
+    drawThumbs();
+  };
+  reader.readAsDataURL(file);
+}
+
+// ---------- input: autosize, paste, slash commands ----------
+function autosize() {
+  input.style.height = "auto";
+  input.style.height = Math.min(input.scrollHeight, 240) + "px";
+}
+let slashIndex = 0;
+// Clawd's own commands, handled here instead of going to Claude (see localCommand).
+const LOCAL_COMMANDS = [
+  { name: "btw", hint: "<question>", description: "Ask a quick side question; the reply carries on and nothing is saved" },
+  { name: "add-dir", description: "Let Claude read folders outside this workspace in this chat" },
+  { name: "memory", description: "Open a CLAUDE.md memory file (or start a message with # to save a note)" },
+];
+function slashMatches() {
+  const m = input.value.match(/^\/([\w:.-]*)$/);
+  if (!m) return [];
+  const q = m[1].toLowerCase();
+  return [...LOCAL_COMMANDS, ...S.commands.filter((c) => !LOCAL_COMMANDS.some((l) => l.name === c.name))].filter((c) => c.name.toLowerCase().includes(q)).sort((a, b) => a.name.toLowerCase().indexOf(q) - b.name.toLowerCase().indexOf(q)).slice(0, 8);
+}
+function renderSlash() {
+  if (mention) return renderMention();
+  const hint = /^#(?!#)[^\n]*$/.test(input.value) ? "Enter: save this note to a CLAUDE.md memory file" : /^![^\n]/.test(input.value) ? "Enter: run this command in the folder; its output goes with your next message" : "";
+  if (hint) return slash.classList.remove("hidden"), slash.replaceChildren(h("div", { class: "menu-title" }, hint));
+  const list = slashMatches();
+  slash.classList.toggle("hidden", !list.length);
+  slashIndex = Math.max(0, Math.min(slashIndex, list.length - 1));
+  slash.replaceChildren(...list.map((c, i) => h("div", { class: `menu-item ${i === slashIndex ? "active" : ""}`, onmousedown: (e) => { e.preventDefault(); pickSlash(c); } },
+    h("div", { class: "menu-text" }, h("div", {}, h("b", {}, "/" + c.name), c.hint ? h("span", { class: "muted" }, " " + c.hint) : null), c.description && h("div", { class: "muted small ellipsis" }, c.description.replace(/\s*\((user|project|plugin.*)\)$/, ""))))));
+}
+function pickSlash(c) {
+  input.value = `/${c.name} `;
+  renderSlash();
+  input.focus();
+}
+// "@" mentions: matching files come from the extension and are picked into chips, like the + picker.
+let mention = null; // { q, items, index } while the caret sits after "@query"
+let mentionTimer;
+function updateMention() {
+  const m = input.value.slice(0, input.selectionStart).match(/(?:^|\s)@([^\s@]*)$/);
+  if (!m) { mention = null; return; }
+  mention = { q: m[1], items: [], index: 0 }; // never pick a result of the previous query
+  clearTimeout(mentionTimer);
+  mentionTimer = setTimeout(() => send({ type: "fileSearch", q: m[1] }), 80);
+}
+function pickMention(item) {
+  const pos = input.selectionStart, before = input.value.slice(0, pos).replace(/@[^\s@]*$/, "");
+  input.value = before + input.value.slice(pos);
+  input.setSelectionRange(before.length, before.length);
+  mention = null;
+  renderSlash();
+  autosize();
+  addItems([item]);
+}
+function renderMention() {
+  const list = mention.items;
+  slash.classList.toggle("hidden", !list.length);
+  slash.replaceChildren(h("div", { class: "menu-title" }, "Attach a file"), ...list.map((f, i) => h("div", { class: `menu-item ${i === mention.index ? "active" : ""}`, onmousedown: (e) => { e.preventDefault(); pickMention(f); } },
+    icon("file"), h("div", { class: "menu-text ellipsis" }, h("span", {}, base(f.rel)), h("span", { class: "muted small" }, "  " + dir(f.rel))))));
+}
+
+input.addEventListener("input", () => { autosize(); slashIndex = 0; updateMention(); renderSlash(); saveDraft(); });
+input.addEventListener("keydown", (e) => {
+  if (e.isComposing || e.keyCode === 229) return; // an IME is composing: its Enter/arrows/Tab belong to it
+  if (mention?.items.length) {
+    const n = mention.items.length;
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") { e.preventDefault(); mention.index = (mention.index + (e.key === "ArrowDown" ? 1 : -1) + n) % n; return renderMention(); }
+    if (e.key === "Tab" || (e.key === "Enter" && !e.shiftKey)) { e.preventDefault(); return pickMention(mention.items[mention.index]); }
+    if (e.key === "Escape") { mention = null; return renderSlash(); }
+  }
+  const list = slashMatches();
+  if (list.length) {
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") { e.preventDefault(); slashIndex = (slashIndex + (e.key === "ArrowDown" ? 1 : -1) + list.length) % list.length; return renderSlash(); }
+    if (e.key === "Tab" || (e.key === "Enter" && !e.shiftKey)) { e.preventDefault(); return pickSlash(list[slashIndex]); }
+    if (e.key === "Escape") { input.value = ""; return renderSlash(); }
+  }
+  if (e.key === "Tab" && !e.shiftKey && !input.value && cur.suggestion && !S.busy) { e.preventDefault(); input.value = cur.suggestion; return autosize(); }
+  if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); submit(); }
+  if (e.key === "Escape" && cur.editing) { e.preventDefault(); cancelEdit(); }
+  // shell-style recall: Up on the first line / Down on the last line walks past prompts
+  const up = e.key === "ArrowUp" && !input.value.slice(0, input.selectionStart).includes("\n");
+  const down = e.key === "ArrowDown" && !input.value.slice(input.selectionEnd).includes("\n");
+  if ((up || down) && !e.shiftKey && !e.altKey && !e.metaKey && !e.ctrlKey) {
+    if (histAt < 0) {
+      // saved prompts, then this chat's own messages (covers chats reopened from history), newest last
+      const own = [...(shown?.el.querySelectorAll(".user-text") || [])].map((x) => x.textContent.trim()).filter((t) => t && t !== "See the attached image.");
+      const all = [...(vscode.getState()?.history || []), ...own];
+      histList = all.filter((t, i) => all.lastIndexOf(t) === i);
+      histAt = histList.length; histDraft = input.value;
+    }
+    const hist = histList;
+    const next = histAt + (up ? -1 : 1);
+    if (next < 0 || next > hist.length) return;
+    e.preventDefault();
+    histAt = next;
+    input.value = next === hist.length ? histDraft : hist[next];
+    input.setSelectionRange(input.value.length, input.value.length);
+    autosize();
+  }
+});
+let histAt = -1, histDraft = "", histList = [];
+input.addEventListener("input", () => { histAt = -1; });
+// The clipboard only takes text from here, so a copied message's images wait in this webview and come back
+// when that same text is pasted. ponytail: this view only; route through the extension for other tabs.
+let copied = null;
+input.addEventListener("paste", (e) => {
+  const raw = e.clipboardData.getData("text/plain") || "";
+  if (raw && copied?.text === raw && copied.images.length) {
+    S.images.push(...copied.images.filter((img) => !S.images.some((x) => x.data === img.data)));
+    renderChips();
+  }
+  for (const item of e.clipboardData.items) {
+    if (!item.type.startsWith("image/") || raw.trim()) continue; // with text too (spreadsheet cells come with a picture of themselves), the text wins
+    e.preventDefault();
+    addImageFile(item.getAsFile());
+  }
+  // Pasted paths (one per line) become file/folder chips; the extension sends back any that don't exist as text.
+  const lines = raw.split(/\r?\n/).map((l) => l.trim().replace(/^(['"])(.*)\1$/, "$2")).filter(Boolean);
+  if (!e.defaultPrevented && lines.length && lines.length <= 50 && lines.every((l) => /^(file:\/\/\S+|~?\/[^\n]+|\.{0,2}[\w.@-]*\/\S*)$/.test(l))) {
+    e.preventDefault();
+    send({ type: "pastePaths", paths: lines, raw }); // any line that isn't a real path: raw goes in unchanged
+  }
+});
+
+// ---------- drag & drop ----------
+let dragDepth = 0;
+window.addEventListener("dragenter", (e) => { e.preventDefault(); dragDepth++; box.classList.add("dragging"); });
+window.addEventListener("dragleave", () => { if (--dragDepth <= 0) { dragDepth = 0; box.classList.remove("dragging"); } });
+window.addEventListener("dragover", (e) => e.preventDefault());
+window.addEventListener("drop", (e) => {
+  e.preventDefault();
+  dragDepth = 0;
+  box.classList.remove("dragging");
+  const uris = droppedUris(e.dataTransfer);
+  if (uris.length) return send({ type: "drop", uris });
+  for (const f of e.dataTransfer.files) if (f.type.startsWith("image/")) addImageFile(f);
+});
+
+// VS Code hands Explorer/editor drags to webviews as "resourceurls" (JSON array of file:// URIs)
+// or "codeeditors" (JSON array of { resource }); the standard uri-list types are a fallback.
+// Read synchronously: once the drop handler yields, the DataTransfer is locked and getAsString never calls back.
+function droppedUris(dt) {
+  const out = new Set();
+  const json = (type, each) => { try { JSON.parse(dt.getData(type) || "[]").forEach(each); } catch {} };
+  json("resourceurls", (u) => typeof u === "string" && out.add(u));
+  json("codeeditors", (ed) => { const r = ed?.resource; const u = r?.external || (r?.fsPath && "file://" + r.fsPath); if (u) out.add(u); });
+  for (const type of ["application/vnd.code.uri-list", "text/uri-list"])
+    (dt.getData(type) || "").split(/\r?\n/).map((u) => u.trim()).filter((u) => u && !u.startsWith("#")).forEach((u) => out.add(u));
+  return [...out].filter((u) => u.startsWith("file:"));
+}
+
+// ---------- conversation ----------
+function scrollDown(force) {
+  const near = scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 120;
+  if (force || near) scroll.scrollTop = scroll.scrollHeight;
+}
+
+function showEmpty(on) {
+  if (cur !== shown) return; // the hero and recent chats belong to the chat on screen
+  if (cur.loading) on = false; // its loading screen is showing instead
+  if (on && empty.parentNode !== scroll) scroll.prepend(empty); // the hero lives in whichever pane is on screen
+  empty.classList.toggle("hidden", !on);
+  showRecent();
+}
+
+function renderEmpty() {
+  empty.replaceChildren(h("div", { class: "hero" },
+    h("div", { class: "logo" }, logo()),
+    h("h2", {}, "Clawd"),
+    h("p", { class: "muted" }, "Build, fix and explain code with Claude Code."),
+    h("div", { class: "hints muted small" },
+      h("span", {}, icon("add"), "attach files"), h("span", {}, icon("symbol-event"), "/ commands"), h("span", {}, icon("diff"), "Keep or Undo edits"))));
+  const row = (s, pinned) => h("div", { class: "recent-item", role: "button", tabindex: "0", title: s.title + (s.note ? `\nLast: ${s.note}` : ""), onclick: () => send({ type: "loadSession", id: s.id }) },
+    icon(pinned ? "pinned" : "comment-discussion"), h("span", { class: "ellipsis" }, s.title, s.note && h("span", { class: "muted" }, ` · ${s.note}`)), h("span", { class: "muted small time" }, ago(s.time)),
+    h("button", { class: "icon-btn pin-chat", title: pinned ? "Unpin" : "Pin (up to 5)", "aria-label": `${pinned ? "Unpin" : "Pin"} chat: ${s.title}`, onclick: (e) => { e.stopPropagation(); send({ type: "pinSession", id: s.id }); } }, icon(pinned ? "pinned" : "pin")),
+    h("button", { class: "icon-btn delete-chat", title: "Delete chat", "aria-label": `Delete chat: ${s.title}`, onclick: (e) => { e.stopPropagation(); send({ type: "deleteSession", id: s.id }); } }, icon("trash")));
+  const recentHead = h("div", { class: "recent-head" }, h("span", { class: "section-title" }, "Recent chats"), h("span", { class: "grow" }),
+    h("button", { class: "link-btn", onclick: () => send({ type: "history" }) }, "View all"));
+  recentPanel.replaceChildren(
+    ...(S.pinned.length ? [h("div", { class: "recent-head" }, h("span", { class: "section-title" }, "Pinned")), ...S.pinned.map((s) => row(s, true))] : []),
+    ...(S.sessions.length ? [recentHead, ...S.sessions.slice(0, 5).map((s) => row(s, false))] : []));
+  showRecent();
+}
+
+function showRecent() {
+  if (cur !== shown) return;
+  recentPanel.classList.toggle("hidden", !(S.sessions.length || S.pinned.length) || cur.loading || !!scroll.querySelector(".turn"));
+}
+
+function ago(t) {
+  const s = (Date.now() - t) / 1000;
+  if (s < 60) return "now";
+  for (const [n, u] of [[86400 * 30, "mo"], [86400 * 7, "w"], [86400, "d"], [3600, "h"], [60, "m"]]) if (s >= n) return `${Math.floor(s / n)}${u} ago`;
+}
+
+function userBubble({ text, chips: c = [], images = [] }, checkpoint) {
+  const textEl = h("div", { class: "user-text" }, text);
+  const bubble = h("div", { class: "user-msg" },
+    checkpoint && h("button", { class: "icon-btn edit-btn", title: "Edit message", onclick: () => editMessage(bubble, checkpoint) }, icon("edit")),
+    c.length || images.length ? h("div", { class: "chips" }, c.map((x) => chip(x)), images.map((img, i) => imageChip(img, images.length > 1 ? i + 1 : 1))) : null,
+    textEl);
+  bubble.images = images; // "Copy message" carries them along
+  return bubble;
+}
+
+// Edit loads the message (text, files, images) into the chat input; Send there restores the checkpoint
+// before it and sends the new version in its place. Whatever was typed before comes back on cancel.
+function editMessage(bubble, checkpoint) {
+  if (S.busy) return;
+  const p = bubble.closest(".turn")?.payload || {};
+  const prev = cur.editing?.prev || { text: input.value, items: S.items, images: S.images };
+  cur.editing?.bubble.classList.remove("editing");
+  cur.editing = { checkpoint, bubble, prev };
+  bubble.classList.add("editing");
+  fillComposer($(".user-text", bubble).textContent.replace(/^See the attached image\.$/, ""), [...(p.items || [])], [...(bubble.images || [])]);
+  input.setSelectionRange(input.value.length, input.value.length);
+}
+
+function cancelEdit() {
+  if (!cur.editing) return;
+  const { prev } = cur.editing;
+  endEdit();
+  fillComposer(prev.text, prev.items, prev.images);
+}
+
+function endEdit() {
+  cur.editing?.bubble.classList.remove("editing");
+  cur.editing = null;
+  renderEditBar();
+}
+
+function renderEditBar(c = shown) { editBar.classList.toggle("hidden", !c?.editing); }
+
+function fillComposer(text, items, images) {
+  input.value = text;
+  S.items = items;
+  S.images = images;
+  hidePreview();
+  renderChips();
+  renderEditBar();
+  autosize();
+  input.focus();
+}
+
+function startTurn(user, payload) {
+  finalize();
+  showEmpty(false);
+  const el = h("div", { class: "turn" });
+  if (payload?.checkpoint) el.dataset.checkpoint = payload.checkpoint;
+  if (user) el.append(userBubble(user, payload?.checkpoint));
+  else el.classList.add("auto"); // Claude carrying on by itself, e.g. after a background task ended
+  const body = h("div", { class: "response" });
+  el.append(body);
+  scroll.append(el);
+  showRecent(); // recent chats only belong on the empty screen
+  el.payload = payload;
+  turn = { el, body, text: null, steps: new Map(), count: 0, payload, start: Date.now() };
+  scrollDown(true);
+}
+
+function ensureTurn() {
+  if (!turn) startTurn(null);
+  return turn;
+}
+
+function working(on, label = "Working…") {
+  const t = turn;
+  if (!t) return;
+  t.working?.remove();
+  t.working = null;
+  t.workingLabel = on ? label : null;
+  if (on) { t.working = h("div", { class: "working shimmer" }, icon("loading", "spin"), label); t.body.append(t.working); }
+}
+
+// The live thinking row says "Thinking…"; once Claude moves on it settles to "Thought".
+function endThinking(t) {
+  const label = t.thinking && $(".think-label", t.thinking);
+  if (label) { label.textContent = "Thought"; label.classList.remove("shimmer"); }
+  t.thinking = null;
+}
+
+function addText(text) {
+  const t = ensureTurn();
+  endThinking(t);
+  if (t.workingLabel && t.workingLabel !== "Working…") working(true); // the text itself shows progress now
+  if (!t.text) { t.text = h("div", { class: "md" }); t.text.raw = ""; t.working ? t.working.before(t.text) : t.body.append(t.text); } // above the spinner now: the render below may run with another chat shown
+  t.text.raw += text;
+  dirty.add(t.text);
+  if (!renderQueued) {
+    renderQueued = requestAnimationFrame(() => {
+      renderQueued = 0;
+      for (const el of dirty) el.innerHTML = md(el.raw);
+      dirty.clear();
+      keepWorkingLast();
+      scrollDown();
+    });
+  }
+}
+const dirty = new Set(); // text blocks waiting for their next markdown render
+let renderQueued = 0;
+
+function keepWorkingLast() {
+  if (turn?.working) turn.body.append(turn.working);
+}
+
+// A step is a <details>: the row is the summary, and its full input and output fold out below.
+function addStep(m) {
+  if (m.parent) return addChildStep(m);
+  const t = ensureTurn();
+  t.text = null;
+  endThinking(t);
+  t.count++;
+  const box = stepBox(m);
+  t.body.append(box);
+  working(false); // the step's own spinner shows progress
+  scrollDown();
+}
+
+function stepBox(m) {
+  const subject = m.file
+    ? h("span", { class: "chip file-link", "data-file": m.file, "data-line": m.range?.split("-")[0] || "", "data-end": m.range?.split("-")[1] || "", title: m.detail }, icon("file"), h("span", { class: "ellipsis" }, base(m.detail) + (m.range ? ` ${m.range}` : "")))
+    : m.detail ? h(m.code ? "code" : "span", { class: "detail ellipsis", title: m.detail }, m.detail) : null;
+  const row = h("summary", { class: "step running", "data-id": m.id, onclick: (e) => { if (!box.classList.contains("has-body")) e.preventDefault(); else box.dataset.touched = "1"; } },
+    h("span", { class: "status" }, icon("loading", "spin")), icon(m.icon || "tools", "step-icon"), h("span", { class: "title" }, m.title), subject,
+    h("span", { class: "meta" }), icon("chevron-right", "chev step-chev"));
+  const box = h("details", { class: "step-box" }, row, h("div", { class: "step-body" }));
+  row.dataset.start = m.at || Date.now(); // for the step's duration
+  if (m.name === "Grep" || m.name === "Glob") { box.search = m.name; box.searchPath = m.searchPath; }
+  if (m.full) ioBlock(box, m.name === "Bash" ? "Command" : m.name === "Agent" || m.name === "Task" ? "Prompt" : "Input", m.full);
+  return box;
+}
+
+const stepRow = (id) => id && scroll.querySelector(`.step[data-id="${CSS.escape(id)}"]`);
+
+// A sub-agent's own steps nest under its Agent step, which stays open while they stream in (unless the user folded it).
+function addChildStep(m) {
+  const parent = stepRow(m.parent);
+  if (!parent) return;
+  const pbox = parent.parentElement;
+  let subs = $(":scope > .step-body > .substeps", pbox);
+  if (!subs) { subs = h("div", { class: "substeps" }); $(".step-body", pbox).prepend(subs); pbox.classList.add("has-body"); }
+  subs.append(stepBox(m));
+  if (!pbox.dataset.touched) pbox.open = true;
+  const n = subs.children.length;
+  $(".meta", parent).textContent = `${n} step${n === 1 ? "" : "s"}`;
+  scrollDown();
+}
+
+// The agent is done: fold its steps away again unless the user opened or closed it.
+function settleAgent(row) {
+  if (!row.parentElement.dataset.touched) row.parentElement.open = false;
+}
+
+function ioBlock(box, label, text, cls = "") {
+  box.classList.add("has-body");
+  const code = text.includes("\x1b[") ? h("code", { html: ansi(text) }) : h("code", {}, text); // a terminal's colors
+  $(".step-body", box).append(h("div", { class: `codeblock io ${cls}` },
+    h("div", { class: "codebar" }, h("span", {}, label), h("button", { class: "icon-btn copy-code", title: "Copy" }, icon("copy"))),
+    h("pre", {}, code)));
+}
+
+// Terminal output to HTML: SGR colors and bold become spans, every other escape sequence goes.
+function ansi(text) {
+  let fg = 0, bold = false, out = "";
+  for (const part of text.split(/(\x1b\[[\d;]*m)/)) {
+    const sgr = part.match(/^\x1b\[([\d;]*)m$/);
+    if (!sgr) {
+      const t = escapeHtml(part.replace(/\x1b\[[\d;?]*[A-Za-z]|\x1b\][^\x07\x1b]*(\x07|\x1b\\)?|\x1b./g, ""));
+      out += t && (fg || bold) ? `<span class="${[fg && "ansi-" + fg, bold && "ansi-bold"].filter(Boolean).join(" ")}">${t}</span>` : t;
+      continue;
+    }
+    for (const n of (sgr[1] || "0").split(";").map(Number)) {
+      if (n === 0) { fg = 0; bold = false; } else if (n === 1) bold = true; else if (n === 22) bold = false; else if (n === 39) fg = 0;
+      else if ((n >= 30 && n <= 37) || (n >= 90 && n <= 97)) fg = n;
+    } // ponytail: 256-color and RGB codes (38;5;n / 38;2;r;g;b) show uncolored, their numbers ignored as SGR
+  }
+  return out;
+}
+
+// Grep and Glob results as a list of matches, each opening its file (at the line, for content searches).
+function matchList(box, text) {
+  const rows = [], all = text.split("\n");
+  // content mode is "path:12:text" (or "12:text" in one file); its context lines use "-" and are left out
+  const content = all.some((l) => /^(.+?:)?\d+:/.test(l));
+  for (const l of all) {
+    if (rows.length >= 200) break;
+    if (!l.trim() || l === "--" || /^Found \d+ /.test(l) || /^\(Results are truncated/.test(l)) continue;
+    let m = null, file = l.replace(/:\d+$/, ""), line = "", rest = ""; // a bare path, or count mode's path:count
+    if (content) {
+      if ((m = l.match(/^(.+?):(\d+):(.*)$/))) [, file, line, rest] = m;
+      else if ((m = l.match(/^(\d+):(.*)$/)) && box.searchPath) { file = box.searchPath; [, line, rest] = m; }
+      else continue;
+    }
+    rows.push(h("div", { class: "match file-link", role: "button", tabindex: "0", "data-file": file, "data-line": m ? line : "", title: l },
+      h("span", { class: "file-name" }, base(file) + (m ? `:${line}` : "")), h("span", { class: "file-dir" }, m ? rest.trim() : dir(file))));
+  }
+  if (!rows.length) return false;
+  box.classList.add("has-body");
+  $(".step-body", box).append(h("div", { class: "codeblock matches" },
+    h("div", { class: "codebar" }, h("span", {}, "Results"), h("button", { class: "icon-btn copy-code", title: "Copy" }, icon("copy"))),
+    h("div", { class: "match-list" }, rows), h("pre", { class: "hidden" }, h("code", {}, text)))); // the copy button copies the raw text
+  return true;
+}
+
+// An edit step folds out to its diff: syntax-colored, the changed words marked, and a click opens it in VS Code.
+function diffBlock(box, m) {
+  box.stepEdit = { id: m.id, ...m.edit }; // for the reply's "Changed N files" line
+  box.stepStats = m.diff;
+  const undo = h("button", { class: "icon-btn undo-step", title: "Undo just this step: put the file back as it was before it, keeping later edits",
+    onclick: () => send({ type: "undoStep", id: m.id, edit: m.edit }) }, icon("discard"), h("span", {}, "Undo"));
+  box.classList.add("has-body");
+  $(".step-body", box).replaceChildren(diffView(m.rows, m.edit.input.file_path || "", () => send({ type: "stepDiff", id: m.id, edit: m.edit }), undo));
+}
+
+function diffView(list, file, open, ...buttons) {
+  const lang = file.split(".").pop();
+  const rows = list.map((r, i) => {
+    if (r.k === "…") return h("div", { class: "dl gap" }, h("span", { class: "sign" }, "⋯"), h("span", {}, r.t));
+    // a removed line right before an added one: mark just the part that changed
+    const pair = r.k === "-" ? list[i + 1]?.k === "+" && list[i + 2]?.k !== "+" && list[i + 1] : r.k === "+" && list[i - 1]?.k === "-" && list[i - 2]?.k !== "-" && list[i - 1];
+    const code = h("span", { class: "dt" });
+    code.innerHTML = pair ? wordDiff(r.t, pair.t, lang) : highlight(r.t, lang) || " ";
+    return h("div", { class: `dl ${r.k === "+" ? "add" : r.k === "-" ? "del" : "ctx"}` }, h("span", { class: "sign" }, r.k), code);
+  });
+  return h("div", { class: "codeblock diffblock" },
+    h("div", { class: "codebar" }, h("span", { class: "grow" }, "Changes"), buttons,
+      h("button", { class: "icon-btn", title: "Open the diff in VS Code", onclick: open }, icon("diff"), h("span", {}, "Open in VS Code"))),
+    h("div", { class: "diff-rows", title: "Click to open the diff in VS Code", onclick: () => !getSelection().toString() && open() }, rows));
+}
+
+// `a` with what differs from `b` (all but their common start and end) wrapped in <mark>.
+function wordDiff(a, b, lang) {
+  let s = 0, e = 0;
+  while (s < a.length && s < b.length && a[s] === b[s]) s++;
+  while (e < a.length - s && e < b.length - s && a[a.length - 1 - e] === b[b.length - 1 - e]) e++;
+  return highlight(a.slice(0, s), lang) + (a.length - e > s ? `<mark>${highlight(a.slice(s, a.length - e), lang)}</mark>` : "") + highlight(a.slice(a.length - e), lang);
+}
+
+function stepResult(m) {
+  const el = stepRow(m.id);
+  if (!el) return;
+  if (m.rows?.length && m.edit) diffBlock(el.parentElement, m);
+  else if (m.output && el.parentElement.search && !m.isError && matchList(el.parentElement, m.output));
+  else if (m.output) ioBlock(el.parentElement, m.isError ? "Error" : "Output", m.output, m.isError ? "io-error" : "");
+  if (m.images?.length) { // e.g. Claude reading a screenshot: show it, click to open in VS Code
+    const box = el.parentElement;
+    box.classList.add("has-body");
+    $(".step-body", box).append(h("div", { class: "step-images" }, m.images.map((img) =>
+      h("img", { src: img.url, alt: "Image from this step", title: "Open image", role: "button", tabindex: "0", onclick: () => send({ type: "openImage", mediaType: img.mediaType, data: img.data }) }))));
+    if (!box.dataset.touched) box.open = true;
+  }
+  el.classList.remove("running");
+  if (!m.parent && S.busy && turn && !turn.body.querySelector(".step.running")) working(true); // between steps: Claude is deciding what's next
+  if (m.background) { // launched: it keeps going after this reply, until its task notification
+    el.classList.add("bg");
+    $(".status", el).replaceChildren(icon("sync", "spin accent"));
+    $(".meta", el).textContent = m.summary;
+    return;
+  }
+  if ($(".substeps", el.parentElement)) settleAgent(el);
+  el.classList.toggle("error", !!m.isError);
+  $(".status", el).replaceChildren(icon(m.isError ? "error" : "check"));
+  const meta = $(".meta", el);
+  if (m.diff) meta.replaceChildren(h("span", { class: "add" }, `+${m.diff.added}`), h("span", { class: "del" }, `-${m.diff.removed}`));
+  else if (m.summary) meta.textContent = m.summary;
+  const took = (m.at || Date.now()) - el.dataset.start;
+  if (took >= 1000) meta.append(h("span", { class: "muted took" }, `${meta.textContent ? " · " : ""}${took < 60000 ? (took / 1000).toFixed(1) + "s" : elapsed(Date.now() - took)}`));
+  if (m.isError && m.error) el.title = m.error;
+  if (m.rows?.length && m.edit && !m.parent) groupEdit(el.parentElement);
+}
+
+// Back-to-back edits to one file read as one row, "Edited x +a −b · 3 edits", that opens to each edit's own step.
+function groupEdit(box) {
+  const file = box.stepEdit.input.file_path, prev = box.previousElementSibling;
+  let group = prev?.classList.contains("edit-group") && prev.file === file ? prev : null;
+  if (!group) {
+    if (prev?.stepEdit?.input.file_path !== file || prev.querySelector(":scope > .step.error")) return;
+    const row = prev.firstElementChild.cloneNode(true);
+    row.removeAttribute("data-id");
+    group = h("details", { class: "step-box edit-group has-body" }, row, h("div", { class: "step-body edit-steps" }));
+    group.file = file;
+    prev.before(group);
+    $(".edit-steps", group).append(prev);
+  }
+  $(".edit-steps", group).append(box);
+  const boxes = [...$(".edit-steps", group).children], sum = (k) => boxes.reduce((n, b) => n + (b.stepStats?.[k] || 0), 0);
+  $(".meta", group.firstElementChild).replaceChildren(h("span", { class: "add" }, `+${sum("added")}`), h("span", { class: "del" }, `-${sum("removed")}`), h("span", { class: "muted" }, ` · ${boxes.length} edits`));
+}
+
+// Thinking often arrives without visible text; only show a row once there is something to read.
+function addThinking() {
+  const t = ensureTurn();
+  endThinking(t);
+  working(true, "Thinking…");
+}
+
+function addThinkingText(text) {
+  const t = ensureTurn();
+  if (!t.thinking) {
+    if (!text.trim()) return;
+    t.text = null;
+    t.thinking = h("details", { class: "thinking" }, h("summary", {}, icon("lightbulb"), h("span", { class: "think-label shimmer" }, "Thinking…")), h("div", { class: "thinking-text muted" }));
+    t.body.append(t.thinking);
+    working(false); // the row itself says "Thinking…"
+  }
+  $(".thinking-text", t.thinking).textContent += text;
+}
+
+// After a turn: fold everything up to the last step into "Completed N steps", keep the answer visible.
+function finalize(ms) {
+  const t = turn;
+  if (!t) return;
+  turn = null;
+  endThinking(t);
+  if (t.working) t.working.remove();
+  const kids = [...t.body.children];
+  let lastStep = -1;
+  kids.forEach((k, i) => { if (k.matches(".step-box, .thinking, .permission")) lastStep = i; });
+  if (lastStep >= 0 && t.count) {
+    const secs = ms ? ` in ${ms < 60000 ? Math.max(1, Math.round(ms / 1000)) + "s" : Math.floor(ms / 60000) + "m " + Math.round((ms % 60000) / 1000) + "s"}` : "";
+    const errors = kids.slice(0, lastStep + 1).filter((k) => k.querySelector(".step.error")).length;
+    const group = h("details", { class: "steps-group" },
+      h("summary", {}, icon("chevron-right", "chev"), `${t.count} step${t.count === 1 ? "" : "s"}${secs}`, errors ? h("span", { class: "del" }, ` · ${errors} failed`) : null));
+    group.append(...kids.slice(0, lastStep + 1));
+    // images from the steps stay in sight as small thumbnails on the folded line
+    const imgs = [...group.querySelectorAll(".step-images img")].slice(0, 6);
+    if (imgs.length) $("summary", group).append(h("span", { class: "summary-thumbs" }, imgs.map((img) =>
+      h("img", { src: img.src, alt: "", title: "Open image", onclick: (e) => { e.preventDefault(); img.click(); } }))));
+    t.body.prepend(group);
+  }
+  for (const s of t.body.querySelectorAll(".step.running")) {
+    if (s.closest(".substeps")?.closest(".step-box")?.querySelector(":scope > .step.bg")) continue; // a background agent is still working on it
+    s.classList.remove("running"); $(".status", s).replaceChildren(icon("circle-slash")); }
+  const answer = [...t.body.querySelectorAll(":scope > .md")].map((e) => e.raw).join("\n\n");
+  if (answer || t.payload) {
+    const cp = t.payload?.checkpoint;
+    // above a trailing notice (a compaction between replies), so the actions stay with the answer
+    const actions = h("div", { class: "msg-actions" },
+      answer && h("button", { class: "icon-btn", title: "Copy answer", onclick: () => send({ type: "copy", text: answer }) }, icon("copy")),
+      // Retry rewinds to before this message and runs it again in place, instead of sending a duplicate.
+      t.payload && h("button", { class: "icon-btn", title: "Retry this message", onclick: () => { if (!S.busy) cp ? send({ type: "editMessage", checkpoint: cp, text: t.payload.text, retry: true }) : dispatch(t.payload); } }, icon("refresh")),
+      cp && h("button", { class: "icon-btn restore-btn", title: "Restore checkpoint: undo this message's file changes and remove it and everything after", onclick: () => !S.busy && send({ type: "restore", checkpoint: cp }) }, icon("discard")));
+    let first = t.body.lastElementChild;
+    while (first?.previousElementSibling?.matches(".notice") && first.matches(".notice")) first = first.previousElementSibling;
+    first?.matches(".notice") ? first.before(actions) : t.body.append(actions);
+  }
+  turnChanges(t);
+}
+
+// "Changed 3 files +40 -12" at the end of a reply that edited files; a click shows all of it in one diff.
+function turnChanges(t) {
+  const files = new Map();
+  for (const box of t.body.querySelectorAll(".step-box")) {
+    if (!box.stepEdit?.input?.file_path || box.querySelector(":scope > .step.undone")) continue;
+    const f = files.get(box.stepEdit.input.file_path) || { file: box.stepEdit.input.file_path, steps: [], added: 0, removed: 0 };
+    f.steps.push(box.stepEdit);
+    f.added += box.stepStats?.added || 0;
+    f.removed += box.stepStats?.removed || 0;
+    files.set(f.file, f);
+  }
+  if (!files.size) return;
+  const list = [...files.values()], add = list.reduce((n, f) => n + f.added, 0), del = list.reduce((n, f) => n + f.removed, 0);
+  const card = h("div", { class: "turn-changes", role: "button", tabindex: "0", title: "Show everything this reply changed in one diff",
+    onclick: () => send({ type: "turnDiff", checkpoint: t.payload?.checkpoint, files: list.map(({ file, steps }) => ({ file, steps })) }) },
+    icon("diff"), `Changed ${list.length} file${list.length === 1 ? "" : "s"}`, h("span", { class: "add" }, ` +${add}`), h("span", { class: "del" }, ` -${del}`),
+    h("span", { class: "muted ellipsis" }, " · " + list.map((f) => base(f.file)).join(", ")));
+  const actions = $(":scope > .msg-actions", t.body);
+  actions ? actions.before(card) : t.body.append(card);
+}
+
+function errorBox(text) {
+  const t = ensureTurn();
+  t.text = null;
+  t.body.append(h("div", { class: "error-box" }, icon("error"), h("div", {}, text)));
+  scrollDown();
+}
+
+// ---------- approvals ----------
+const append = (el, ...kids) => el.append(...kids.filter(Boolean)); // optional buttons pass `false`
+// Answered or cancelled: the buttons go, and the choices and feedback box left in the card freeze as they were.
+function closeCard(actions, ...status) {
+  actions.closest(".permission")?.querySelectorAll("button, textarea").forEach((e) => (e.disabled = true));
+  actions.replaceWith(h("div", { class: "decided muted" }, ...status));
+}
+function permissionCard(m) {
+  const t = ensureTurn();
+  t.text = null;
+  const actions = h("div", { class: "actions", "data-perm": m.id });
+  const decide = (allow, extra = {}, label) => {
+    send({ type: "permission", id: m.id, allow, ...extra });
+    closeCard(actions, icon(allow ? "check" : "close"), label || (allow ? "Allowed" : "Rejected"));
+    working(S.busy);
+  };
+  let card;
+  if (m.kind === "plan") {
+    const feedback = h("textarea", { rows: 2, placeholder: "Or tell it what to change…" });
+    append(actions, 
+      h("button", { class: "primary", onclick: () => decide(true, {}, "Plan approved, building") }, icon("play"), "Approve & build"),
+      h("button", { title: "Open the plan in an editor; your changes are what gets built", onclick: () => send({ type: "editPlan", id: m.id }) }, icon("edit"), "Edit plan"),
+      h("button", { onclick: () => decide(false, { feedback: feedback.value.trim() }, "Kept planning") }, "Keep planning"));
+    card = h("div", { class: "permission plan" }, h("div", { class: "card-title" }, icon("list-ordered"), "Proposed plan"), h("div", { class: "md", html: md(m.plan) }), feedback, actions);
+    card.dataset.plan = m.id;
+  } else if (m.kind === "question") {
+    const answers = {};
+    const blocks = m.questions.map((q) => {
+      const opts = h("div", { class: "options" }, q.options.map((o) => {
+        const b = h("button", { class: "option", title: o.description || "", onclick: () => {
+          if (q.multiSelect) { b.classList.toggle("selected"); answers[q.question] = [...opts.querySelectorAll(".selected")].map((x) => x.dataset.label).join(", "); }
+          else { opts.querySelectorAll(".selected").forEach((x) => x.classList.remove("selected")); b.classList.add("selected"); answers[q.question] = o.label; }
+        } }, h("b", {}, o.label), o.description && h("div", { class: "muted small" }, o.description));
+        b.dataset.label = o.label;
+        return b;
+      }));
+      return h("div", { class: "question" }, h("div", { class: "q" }, q.question), opts);
+    });
+    append(actions, h("button", { class: "primary", onclick: () => decide(true, { answers }, "Answered") }, "Submit"), h("button", { onclick: () => decide(false, {}, "Skipped") }, "Skip"));
+    card = h("div", { class: "permission" }, h("div", { class: "card-title" }, icon("question"), "Clawd has a question"), blocks, actions);
+  } else if (m.kind === "edit") {
+    append(actions, 
+      h("button", { class: "primary", onclick: () => decide(true, {}, "Applied") }, icon("check"), "Apply"),
+      !m.risk && h("button", { title: "Apply this and every later edit in this chat without asking", onclick: () => decide(true, { allEdits: true }, "Applied · later edits in this chat apply without asking") }, icon("check-all"), "Allow all edits in this chat"),
+      h("button", { onclick: () => decide(false) }, "Reject"),
+      m.hasDiff && !m.rows?.length && h("button", { class: "ghost", onclick: () => send({ type: "showProposed", id: m.id }) }, icon("diff"), "View diff"));
+    card = h("div", { class: "permission" }, h("div", { class: "card-title" }, icon("edit"), `${m.name} `, h("span", { class: "chip file-link", "data-file": m.detail, title: m.detail }, icon("file"), base(m.detail)), "?"),
+      m.risk && h("div", { class: "risk" }, icon("warning"), m.risk),
+      m.rows?.length && diffView(m.rows, m.detail, () => send({ type: "showProposed", id: m.id })), actions);
+  } else {
+    append(actions, 
+      h("button", { class: "primary", onclick: () => decide(true) }, "Allow"),
+      m.canAlways && h("button", { onclick: () => decide(true, { always: true }, "Allowed for this session") }, "Allow for session"),
+      h("button", { class: "ghost", onclick: () => decide(false) }, "Reject"));
+    card = h("div", { class: "permission" }, h("div", { class: "card-title" }, icon("shield"), m.question || `Allow ${m.name}?`),
+      m.sub && h("div", { class: "muted small" }, m.sub), m.detail && h("pre", { class: "cmd" }, m.detail), actions);
+  }
+  t.body.append(card);
+  working(false);
+  scrollDown(true);
+}
+
+// ---------- panels above the box ----------
+function renderTodos() {
+  if (cur !== shown) return;
+  const list = S.todos;
+  todosPanel.classList.toggle("hidden", !list.length || list.every((t) => t.status === "completed") && !S.busy);
+  if (!list.length) return;
+  const done = list.filter((t) => t.status === "completed").length;
+  const open = todosPanel.querySelector("details")?.open ?? false;
+  const statusIcon = (s) => (s === "completed" ? icon("pass-filled", "ok") : s === "in_progress" ? icon("loading", "spin accent") : icon("circle-large-outline", "muted"));
+  const current = list.find((t) => t.status === "in_progress");
+  todosPanel.replaceChildren(h("details", { open },
+    h("summary", {}, icon("chevron-right", "chev"), icon("checklist"), `Todos (${done}/${list.length})`, current && h("span", { class: "muted ellipsis" }, " · " + (current.activeForm || current.content))),
+    h("div", { class: "todo-list" }, list.map((t) => h("div", { class: `todo ${t.status}` }, statusIcon(t.status), h("span", {}, t.content))))));
+}
+
+// Background tasks still running in the chat on screen: what they are, how long they've run, Stop and Output.
+const TASK_ICON = { local_agent: "hubot", local_bash: "terminal" };
+const elapsed = (t) => { const s = Math.max(0, Math.round((Date.now() - t) / 1000)); return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${s % 60}s`; };
+function renderTasks() {
+  if (cur !== shown) return;
+  const list = cur.tasks;
+  tasksPanel.classList.toggle("hidden", !list.length);
+  if (!list.length) return;
+  const open = tasksPanel.querySelector("details")?.open ?? true;
+  const agents = list.filter((t) => t.type === "local_agent").length;
+  const label = [agents && `${agents} agent${agents === 1 ? "" : "s"}`, list.length - agents && `${list.length - agents} command${list.length - agents === 1 ? "" : "s"}`].filter(Boolean).join(", ");
+  tasksPanel.replaceChildren(h("details", { open },
+    h("summary", {}, icon("chevron-right", "chev"), icon("loading", "spin accent"), `Running in background · ${label}`),
+    h("div", { class: "task-list" }, list.map((t) => h("div", { class: "task-row", role: "button", tabindex: "0", title: t.progress || t.description, onclick: () => revealStep(t.toolUseId) },
+      icon(TASK_ICON[t.type] || "tools", "task-icon"),
+      h("div", { class: "task-text" }, h("div", { class: "ellipsis" }, t.description), t.progress && t.progress !== t.description && h("div", { class: "muted small ellipsis" }, t.progress)),
+      h("span", { class: "muted small time", "data-start": t.start }, elapsed(t.start)),
+      h("span", { class: "row-actions" },
+        t.type === "local_bash" && h("button", { class: "icon-btn", title: "Open output", onclick: (e) => { e.stopPropagation(); send({ type: "taskOutput", taskId: t.id }); } }, icon("output")),
+        h("button", { class: "icon-btn", title: "Stop task", onclick: (e) => { e.stopPropagation(); send({ type: "stopTask", taskId: t.id }); } }, icon("debug-stop"))))))));
+}
+setInterval(() => tasksPanel.querySelectorAll("[data-start]").forEach((e) => (e.textContent = elapsed(+e.dataset.start))), 1000);
+
+const revealStep = (id) => reveal(stepRow(id));
+function reveal(row) {
+  if (!row) return;
+  for (let d = row.parentElement.closest("details"); d; d = d.parentElement.closest("details")) if (!d.firstElementChild.contains(row)) d.open = true; // folded groups around it
+  row.scrollIntoView({ block: "center", behavior: "smooth" });
+  row.classList.add("flash");
+  setTimeout(() => row.classList.remove("flash"), 1200);
+}
+
+// A background task ended: a line in the chat, and its step settles. Between replies the line stands on its own,
+// and whatever Claude says about it next comes as a reply without a user message.
+const TASK_END = { completed: ["pass", "ok"], failed: ["error", "del"], stopped: ["circle-slash", "muted"], killed: ["circle-slash", "muted"] };
+function taskEvent(m) {
+  const [ic, cls] = TASK_END[m.status] || TASK_END.completed;
+  const row = h("div", { class: `task-event ${m.status}` }, icon(ic, cls), h("span", { class: "grow ellipsis", title: m.summary }, m.summary || `Background task ${m.status}`),
+    m.toolUseId && stepRow(m.toolUseId) && h("button", { class: "link-btn", onclick: () => revealStep(m.toolUseId) }, "Show step"),
+    m.outputFile && h("button", { class: "link-btn", onclick: () => send({ type: "open", file: m.outputFile }) }, "Output"));
+  eventRow(row);
+  const step = stepRow(m.toolUseId);
+  if (step) {
+    step.classList.remove("bg", "running");
+    step.classList.toggle("error", m.status === "failed");
+    $(".status", step).replaceChildren(icon(m.status === "completed" ? "check" : m.status === "failed" ? "error" : "circle-slash"));
+    $(".meta", step).textContent = m.status === "completed" ? "" : m.status;
+    if (m.result) ioBlock(step.parentElement, "Result", m.result);
+    settleAgent(step);
+  }
+  scrollDown();
+}
+
+const size = (n) => n < 1024 ? `${n} B` : n < 1048576 ? `${Math.round(n / 1024)} KB` : `${(n / 1048576).toFixed(1)} MB`;
+// A binary file (an image, say) has no lines to count, so it shows its size instead.
+const binaryStats = (f) => f.created ? `new · ${size(f.after)}` : f.deleted ? `deleted · ${size(f.before)}` : `${size(f.before)} → ${size(f.after)}`;
+
+const lastEditStep = (file) => [...(shown?.el.querySelectorAll(".step-box") || [])].filter((b) => b.stepEdit?.input.file_path === file).pop()?.firstElementChild;
+
+function renderChanges() {
+  const files = shown?.changes || [];
+  changesPanel.classList.toggle("hidden", !files.length);
+  if (!files.length) return;
+  const add = files.reduce((n, f) => n + f.added, 0), del = files.reduce((n, f) => n + f.removed, 0), bins = files.filter((f) => f.binary).length;
+  const open = changesPanel.querySelector("details")?.open ?? false;
+  changesPanel.replaceChildren(h("details", { open },
+    h("summary", {}, icon("chevron-right", "chev"), `${files.length} file${files.length === 1 ? "" : "s"} changed`, bins < files.length && h("span", { class: "add" }, ` +${add}`), bins < files.length && h("span", { class: "del" }, ` -${del}`),
+      bins > 0 && h("span", { class: "muted" }, ` · ${bins} binary`), h("span", { class: "grow" }),
+      h("button", { class: "primary small", onclick: (e) => { e.preventDefault(); send({ type: "keep" }); } }, "Keep"),
+      h("button", { class: "small", onclick: (e) => { e.preventDefault(); send({ type: "undo" }); } }, "Undo")),
+    h("div", { class: "file-list" }, files.map((f) => h("div", { class: "file-row file-link", role: "button", tabindex: "0", "data-file": f.file, title: f.rel },
+      icon(f.created ? "new-file" : f.deleted ? "trash" : f.binary ? "file-media" : "file", "file-icon"),
+      h("span", { class: "file-name" }, base(f.rel)),
+      h("span", { class: "file-dir" }, dir(f.rel)),
+      f.binary ? h("span", { class: "file-stats muted" }, binaryStats(f))
+        : h("span", { class: "file-stats" }, h("span", { class: "add" }, `+${f.added}`), h("span", { class: "del" }, `-${f.removed}`)),
+      h("span", { class: "row-actions" },
+        lastEditStep(f.file) && h("button", { class: "icon-btn", title: "Show the last step that changed it", onclick: (e) => { e.stopPropagation(); reveal(lastEditStep(f.file)); } }, icon("go-to-file")),
+        !(f.binary && (f.created || f.deleted)) && h("button", { class: "icon-btn", title: "View diff", onclick: (e) => { e.stopPropagation(); send({ type: "diffFile", file: f.file }); } }, icon("diff")),
+        h("button", { class: "icon-btn", title: "Keep", onclick: (e) => { e.stopPropagation(); send({ type: "keep", file: f.file }); } }, icon("check")),
+        h("button", { class: "icon-btn", title: "Undo", onclick: (e) => { e.stopPropagation(); send({ type: "undo", file: f.file }); } }, icon("discard"))))))));
+}
+
+// ---------- sending ----------
+function setBusy(on) {
+  S.busy = on;
+  cur.busy = on;
+  if (on) cur.suggestion = null; // a new turn makes the old guess stale
+  renderTabs();
+  if (cur !== shown) return;
+  document.body.classList.toggle("busy", on);
+  stopBtn.classList.toggle("hidden", !on);
+  sendBtn.title = on ? "Queue: sent when this reply ends (Enter)" : "Send (Enter)";
+  setPlaceholder();
+  if (!on) renderTodos();
+  if (cur.queue.length) renderQueue(); // "Send now" only while idle
+}
+
+// Claude's guess at the next message shows as the placeholder; Tab in the empty box takes it.
+function setPlaceholder() {
+  input.placeholder = S.busy ? "Queue a follow-up… it's sent when this reply ends"
+    : cur.suggestion ? `${cur.suggestion}   ⇥ Tab` : "Ask Clawd to build, fix or explain…";
+}
+
+// While a past chat is read and drawn: a progress line, its title, and a pulsing sketch shaped like the chat.
+function loadingScreen(title) {
+  const line = (w) => h("div", { class: "sk-line", style: `width: ${w}%` });
+  const ask = (...w) => h("div", { class: "sk-user" }, w.map(line));
+  return h("div", { class: "loading-chat", role: "status", "aria-label": "Loading the conversation" },
+    h("div", { class: "loading-bar" }, h("span")),
+    h("div", { class: "loading-head" }, icon("loading", "spin"), h("span", { class: "ellipsis" }, title || "Opening chat…")),
+    h("div", { class: "skeleton", "aria-hidden": "true" }, // enough rows for a tall panel; the rest is clipped
+      [1, 2, 3, 4].flatMap(() => [ask(90, 55), line(94), line(81), line(88), line(46), ask(70), line(90), line(72), line(84)])));
+}
+
+function submit() {
+  if (cur.loading) return; // the chat isn't there yet
+  const text = input.value.trim();
+  if (!text && !S.images.length) return;
+  const a = S.useActive && !activeIsAttached() && S.active;
+  const chipsShown = [...(a ? [{ kind: "file", rel: a.rel, file: a.file, range: a.selection ? `${a.selection.start}-${a.selection.end}` : "" }] : []), ...S.items];
+  const payload = { text: text || "See the attached image.", images: S.images, items: S.items, useActive: !!a, chips: chipsShown };
+  const local = !cur.editing && !S.images.length && localCommand(text); // works while Claude is replying too
+  // the input stays filled until the extension has restored the checkpoint (its confirm can be cancelled)
+  if (!local && cur.editing) return void (!S.busy && (cur.editing.sent = payload, send({ type: "editMessage", checkpoint: cur.editing.checkpoint, text: payload.text })));
+  if (local) {}
+  else if (S.busy) { cur.queue.push(payload); renderQueue(); } // sent when this reply ends, like typing ahead in the terminal
+  else dispatch(payload);
+  if (text) {
+    const hist = (vscode.getState()?.history || []).filter((t) => t !== text).concat(text).slice(-100);
+    vscode.setState({ ...vscode.getState(), history: hist });
+  }
+  histAt = -1;
+  input.value = "";
+  if (!local) { S.items = []; S.images = []; } // attached files wait for the next real message
+  autosize();
+  renderChips();
+  drawThumbs();
+  mention = null;
+  renderSlash();
+}
+
+// "/btw …", "/add-dir", "/memory", "# note" and "!command" are Clawd's to handle. True when `text` was one of them.
+function localCommand(text) {
+  const cmd = text.match(/^\/(btw|add-dir|memory)(?:\s+([\s\S]*))?$/);
+  if (cmd?.[1] === "btw") return !!cmd[2] && (send({ type: "btw", text: cmd[2] }), true);
+  if (cmd?.[1] === "add-dir") return send({ type: "addDir" }), true;
+  if (cmd?.[1] === "memory") return send({ type: "memory" }), true;
+  if (/^#(?!#)[^\n]*$/.test(text) && text.slice(1).trim()) return send({ type: "memory", text: text.slice(1).trim() }), true;
+  if (/^!\s*\S/.test(text)) return send({ type: "shell", command: text.slice(1).trim() }), true;
+  return false;
+}
+
+function renderQueue() {
+  if (synced) send({ type: "queue", items: cur.queue.map(({ text, items, chips, useActive }) => ({ text, items, chips, useActive })) }); // kept by the extension across reloads
+  if (cur !== shown) return;
+  const q = cur.queue;
+  queuePanel.classList.toggle("hidden", !q.length);
+  queuePanel.replaceChildren(...q.map((p, i) => h("div", { class: "queued" }, icon("clock", "muted"),
+    h("span", { class: "ellipsis grow", title: p.text }, p.text), h("span", { class: "muted small" }, i ? `queued #${i + 1}` : "next"),
+    !S.busy && !i && h("button", { class: "icon-btn", title: "Send now", onclick: () => { if (S.busy) return; dispatch({ images: [], ...q.shift() }); renderQueue(); } }, icon("play")),
+    h("button", { class: "icon-btn", title: "Edit: move it back to the input", onclick: () => { q.splice(i, 1); unqueue([p]); } }, icon("edit")),
+    h("button", { class: "icon-btn", title: "Remove from queue", onclick: () => { q.splice(i, 1); renderQueue(); } }, icon("close")))));
+}
+
+// Queued messages go back into the input (text, files and images), ahead of anything typed since.
+function unqueue(list) {
+  input.value = [...list.map((p) => (p.text === "See the attached image." ? "" : p.text)), input.value].filter(Boolean).join("\n\n");
+  for (const p of list) { S.items.push(...p.items); S.images.push(...p.images); }
+  renderQueue();
+  renderChips();
+  autosize();
+  input.focus();
+}
+
+// Stopping means "not like this": the queued messages shouldn't fire on their own.
+function stop() {
+  if (cur.queue.length) unqueue(cur.queue.splice(0));
+  send({ type: "stop" });
+}
+
+// ---------- context meter: how full the conversation is; a click runs /compact ----------
+const kTok = (n) => (n >= 1000 ? `${Math.round(n / 1000)}k` : `${n}`);
+function renderMeter() {
+  if (cur !== shown) return;
+  const c = cur.context;
+  meterBtn.classList.toggle("hidden", !c?.used);
+  if (!c?.used) return;
+  // With auto-compact on, the ring fills toward the point where Claude compacts on its own, not toward the model's window.
+  const limit = c.threshold || c.window;
+  const pct = Math.min(100, Math.round((c.used / limit) * 100));
+  meterBtn.className = `context-meter ${pct >= 90 ? "crit" : pct >= 70 ? "warn" : ""}`;
+  meterBtn.style.setProperty("--pct", pct);
+  const auto = c.threshold ? `Auto-compacts at ${kTok(c.threshold)} (${pct}% of the way).` : c.threshold === 0 ? "Auto-compact is off (Settings → Clawd: Auto Compact At)." : "";
+  meterBtn.title = `Context: ${kTok(c.used)} of ${kTok(c.window)} tokens\n${auto ? auto + "\n" : ""}Click to compact now: Claude summarizes the conversation so far to free up space.`;
+  meterBtn.setAttribute("aria-label", `Context ${pct}% full. Compact conversation`);
+  meterBtn.replaceChildren(h("span", { class: "ring" }), `${pct}%`);
+}
+function compact() {
+  if (!S.busy) dispatch({ text: "/compact", images: [], items: [], useActive: false, chips: [] });
+}
+
+// A line between replies (task finished, conversation compacted); inside the reply while one is running.
+// A compaction can land mid-reply (and a reopened chat is never busy), so it never ends the turn.
+function eventRow(el, keepTurn) {
+  if (!S.busy && !keepTurn) finalize();
+  (turn ? turn.body : scroll).append(el);
+  scrollDown();
+}
+
+function dropRedo() {
+  redo?.bar.remove();
+  redo = null;
+}
+
+function renderRedo() {
+  const n = redo.stack[redo.stack.length - 1].length, more = redo.stack.length - 1;
+  redo.bar.replaceChildren(icon("discard"), h("span", { class: "grow" }, `Restored checkpoint · removed ${n} message${n === 1 ? "" : "s"}${more ? ` · ${more} earlier restore${more === 1 ? "" : "s"} to redo` : ""}`),
+    h("button", { class: "small", title: "Bring back the messages and file changes of the latest restore", onclick: () => !S.busy && send({ type: "redo" }) }, icon("redo"), "Redo"));
+  scroll.append(redo.bar);
+}
+
+function dispatch(p) {
+  dropRedo();
+  p = { ...p, checkpoint: nextCheckpoint++ };
+  startTurn({ text: p.text, chips: p.chips, images: p.images }, p);
+  setBusy(true);
+  working(true);
+  send({ type: "send", text: p.text, images: p.images.map(({ mediaType, data }) => ({ mediaType, data })), context: p.items, useActive: p.useActive, checkpoint: p.checkpoint });
+}
+
+// Rows that act like buttons (recent chats, tabs, tasks, files, images) work from the keyboard too.
+document.addEventListener("keydown", (e) => {
+  const el = e.target.closest?.('[role="button"], [role="tab"]');
+  if (el && el === e.target && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); el.click(); } // not for a button inside the row
+});
+
+// ---------- clicks on file chips anywhere ----------
+document.addEventListener("click", (e) => {
+  const link = e.target.closest(".file-link");
+  if (link) e.preventDefault(); // don't also fold a step open
+  if (link) return send({ type: "open", file: link.dataset.file, line: Number(link.dataset.line) || undefined, end: Number(link.dataset.end) || undefined });
+  const copy = e.target.closest(".copy-code");
+  if (copy) {
+    send({ type: "copy", text: copy.closest(".codeblock").querySelector("code").textContent });
+    copy.replaceChildren(icon("check"));
+    setTimeout(() => copy.replaceChildren(icon("copy")), 1200);
+  }
+  const use = e.target.closest(".insert-code, .apply-code");
+  if (use) {
+    const block = use.closest(".codeblock");
+    send({ type: use.classList.contains("insert-code") ? "insertCode" : "applyCode", text: block.querySelector("code").textContent, lang: block.dataset.lang });
+  }
+});
+
+// ---------- plan usage card (opened from the status bar) ----------
+const usageCard = h("div", { class: "usage-card hidden", role: "dialog", "aria-label": "Plan usage" });
+document.body.append(usageCard);
+document.addEventListener("mousedown", (e) => { if (!usageCard.classList.contains("hidden") && !usageCard.contains(e.target)) usageCard.classList.add("hidden"); });
+document.addEventListener("keydown", (e) => { if (e.key === "Escape") usageCard.classList.add("hidden"); });
+
+function untilText(t) {
+  const s = t - Date.now() / 1000;
+  if (!(s > 0)) return "";
+  const d = Math.floor(s / 86400), hr = Math.floor((s % 86400) / 3600), m = Math.floor((s % 3600) / 60);
+  return d ? `in ${d}d ${hr}h` : hr ? `in ${hr}h ${m}m` : `in ${m}m`;
+}
+function resetText(t) {
+  if (!t) return "";
+  const date = new Date(t * 1000);
+  const sameDay = date.toDateString() === new Date().toDateString();
+  const time = date.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+  return `Resets ${sameDay ? time : date.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" }) + " at " + time}`;
+}
+
+function meter(title, sub, w) {
+  const pct = w?.used == null ? null : Math.round(w.used * 100);
+  const level = pct == null ? "" : pct >= 90 ? "crit" : pct >= 70 ? "warn" : "";
+  const fill = h("span", {});
+  fill.style.width = Math.min(100, pct ?? 0) + "%"; // set through CSSOM: the CSP has no 'unsafe-inline', so a style attribute would be dropped
+  return h("div", { class: "usage-row" },
+    h("div", { class: "usage-line" }, h("b", {}, title), h("span", { class: "muted small" }, sub), h("span", { class: "grow" }), h("span", { class: "muted small", title: w?.resetsAt ? untilText(w.resetsAt) : "" }, resetText(w?.resetsAt))),
+    h("div", { class: "usage-num" }, h("span", { class: "big" }, pct == null ? "–" : `${pct}%`), h("span", { class: "muted" }, " used")),
+    h("div", { class: `bar ${level}`, role: "progressbar", "aria-valuenow": pct ?? 0, "aria-valuemin": 0, "aria-valuemax": 100 }, fill));
+}
+
+function renderUsage() {
+  const u = S.usage;
+  const rows = [];
+  if (!u || (!u.session && !u.weekly)) {
+    rows.push(h("div", { class: "usage-empty muted" }, icon("pulse"), "No usage data yet. Send a message and your limits appear here."));
+  } else {
+    if (u.status === "rejected") rows.push(h("div", { class: "usage-alert" }, icon("warning"), `Limit reached. ${resetText(u.resetsAt)}${u.resetsAt ? " (" + untilText(u.resetsAt) + ")" : ""}.`));
+    if (u.session) rows.push(meter("Session", "5-hour window", u.session));
+    if (u.weekly) rows.push(meter("Weekly", "all models", u.weekly));
+    rows.push(h("div", { class: "usage-kv" }, h("span", {}, "Extra usage"), h("span", { class: "grow" }),
+      h("span", { class: "muted" }, u.usingOverage ? "In use" : u.overage === "rejected" ? "Off" : u.overage ? "Available" : "–")));
+  }
+  usageCard.replaceChildren(
+    h("div", { class: "usage-head" }, logo("head-logo"), h("b", {}, "Clawd"), S.plan && h("span", { class: "plan" }, S.plan), h("span", { class: "grow" }),
+      h("button", { class: "primary small", onclick: () => send({ type: "openUsagePage" }) }, "Manage"),
+      h("button", { class: "icon-btn", title: "Close", onclick: () => usageCard.classList.add("hidden") }, icon("close"))),
+    ...rows,
+    h("div", { class: "usage-foot muted small" }, icon("info"), h("span", { class: "grow" }, u?.updated ? `Updated ${ago(u.updated)} · refreshes every 2 min` : "Refreshes every 2 min"),
+      h("button", { class: "icon-btn", title: "Refresh now", onclick: () => send({ type: "refreshUsage" }) }, icon("refresh"))));
+}
+setInterval(() => { if (!usageCard.classList.contains("hidden")) renderUsage(); }, 30000); // keep "Updated … ago" honest while open
+
+// ---------- chats: one pane each, switched with the tab strip ----------
+function makeChat(key) {
+  const el = h("div", { class: "scroll hidden", role: "log", "aria-label": "Conversation" });
+  el.addEventListener("scroll", flashThumb, { passive: true });
+  el.addEventListener("scroll", () => el.scrollTop < 400 && loadOlder(c), { passive: true });
+  composer.before(el);
+  const c = { key, el, turn: null, redo: null, busy: false, todos: [], tasks: [], queue: [], context: null, title: "", unread: false, attention: false,
+    changes: [], draft: { text: "", items: [], images: [], useActive: true } }; // its own files changed and its own unsent message
+  chats.set(key, c);
+  paneResize.observe(el);
+  new MutationObserver(() => c === shown && drawSoon()).observe(el, { childList: true, subtree: true });
+  renderTabs();
+  return c;
+}
+
+// A reopened chat shows its latest messages first; earlier pages come in as the user scrolls up.
+function loadOlder(c, all) {
+  if (!c.more || c.olderPending) return;
+  c.olderPending = true;
+  keepPlace(c.el, () => c.el.prepend(h("div", { class: "older-loading muted" }, icon("loading", "spin"), "Loading earlier messages…")));
+  vscode.postMessage({ chat: c.key, type: "loadOlder", all });
+}
+
+// Add things above what's on screen without moving it: the message at the top of the view stays put.
+// (The browser's own scroll anchoring does this, except at scrollTop 0, which is exactly where older pages load.)
+function keepPlace(el, fn) {
+  const top = el.getBoundingClientRect().top;
+  const a = [...el.querySelectorAll(".turn")].find((x) => x.getBoundingClientRect().bottom > top);
+  const before = a?.getBoundingClientRect().top;
+  fn();
+  if (a) el.scrollTop += a.getBoundingClientRect().top - before;
+}
+
+// Alt+↑ / Alt+↓: to the previous / next message you sent. Above the first loaded one, load the older page and go on there.
+function jumpTurn(up) {
+  shown.jumpUp = false; // a newer key press wins over one still waiting for the older page
+  const el = shown.el, top = el.getBoundingClientRect().top + 8, turns = [...el.querySelectorAll(".turn")];
+  const t = up ? turns.findLast((x) => x.getBoundingClientRect().top < top - 4) : turns.find((x) => x.getBoundingClientRect().top > top + 4);
+  if (t) return void (el.scrollTop += t.getBoundingClientRect().top - top);
+  if (!up) return;
+  if (shown.more) { shown.jumpUp = true; return loadOlder(shown); }
+  el.scrollTop = 0;
+}
+
+// Not enough on screen to scroll up yet: fetch the next page now.
+function fillOlder(c) {
+  if (c === shown && c.el.scrollHeight <= c.el.clientHeight + 400) loadOlder(c);
+}
+
+// Point the conversation functions (turn, redo, busy, todos, scroll) at chat `c`.
+function enter(c) {
+  if (c === cur) return;
+  if (cur) Object.assign(cur, { turn, redo, busy: S.busy, todos: S.todos });
+  cur = c;
+  ({ turn, redo } = c);
+  S.busy = c.busy;
+  S.todos = c.todos;
+  scroll = c.el;
+}
+
+function inChat(key, fn) {
+  const prev = cur;
+  enter(chats.get(key) || makeChat(key));
+  try { fn(); } finally { enter(prev); }
+}
+
+// The composer (text, attached chips and images, the current-file toggle) belongs to the chat on screen:
+// park it on the chat being left, bring back the one being shown.
+function swapDraft(from, to) {
+  if (from === to) return;
+  if (from) from.draft = { text: input.value, items: S.items, images: S.images, useActive: S.useActive };
+  const d = to.draft;
+  input.value = d.text;
+  S.items = d.items;
+  S.images = d.images;
+  S.useActive = d.useActive;
+  hidePreview();
+  renderChips();
+  renderEditBar(to);
+  autosize();
+}
+
+// Put text and chips into chat c's composer: the live one if it's on screen, else its parked draft.
+function setDraft(c, text, items) {
+  if (c !== shown) return void (c.draft = { ...c.draft, text, items });
+  input.value = text;
+  S.items = items;
+  renderChips();
+  autosize();
+  input.focus();
+}
+
+function showChat(key, tell) {
+  histAt = -1; // recall restarts from the newly shown chat
+  const c = chats.get(key) || makeChat(key);
+  swapDraft(shown && chats.has(shown.key) ? shown : null, c);
+  mention = null; // the @ menu belonged to the chat being left
+  slashIndex = 0;
+  renderSlash();
+  enter(c);
+  shown = c;
+  const caughtUp = c.busy || c.unread; // it kept going while hidden: show the latest
+  c.unread = c.attention = false;
+  for (const x of chats.values()) x.el.classList.toggle("hidden", x !== c);
+  showEmpty(!scroll.querySelector(".turn"));
+  setBusy(c.busy);
+  renderTodos();
+  renderTasks();
+  renderQueue();
+  renderMeter();
+  renderChanges();
+  if (caughtUp) scrollDown(true);
+  placeThumb();
+  closeFind();
+  drawSoon();
+  fillOlder(c);
+  if (tell) send({ type: "switchChat" });
+}
+
+function closeChat(key) {
+  const c = chats.get(key);
+  if (!c) return;
+  chats.delete(key);
+  c.el.remove();
+  if (c === shown) { cur = shown = null; const next = [...chats.values()].pop(); if (next) showChat(next.key); }
+  renderTabs();
+}
+
+function renderTabs() {
+  if (inTab) headTitle.textContent = shown?.title || "New chat";
+  tabsBar.classList.toggle("hidden", chats.size < 2);
+  if (chats.size < 2) return;
+  tabsBar.replaceChildren(...[...chats.values()].map((c) => {
+    const state = c.attention ? icon("bell-dot", "attn") : c.busy || c.tasks.length ? icon("loading", "spin")
+      : c.unread ? h("span", { class: "dot", title: "New reply" }) : icon("comment-discussion", "muted");
+    return h("div", { class: `chat-tab ${c === shown ? "active" : ""}`, role: "tab", tabindex: "0", "aria-selected": String(c === shown), title: (c.title || "New chat") + " · double-click to rename",
+      onclick: () => c !== shown && showChat(c.key, true), ondblclick: () => send({ type: "renameChat", chat: c.key }),
+      // middle-click closes, like editor tabs; mousedown is stopped too so it doesn't start autoscroll
+      onmousedown: (e) => e.button === 1 && e.preventDefault(),
+      onauxclick: (e) => { if (e.button === 1) { e.preventDefault(); send({ type: "closeChat", chat: c.key }); } } },
+      state, h("span", { class: "ellipsis" }, c.title || "New chat"),
+      h("button", { class: "icon-btn close", title: "Close chat", "aria-label": `Close chat: ${c.title || "New chat"}`, onclick: (e) => { e.stopPropagation(); send({ type: "closeChat", chat: c.key }); } }, icon("close")));
+  }));
+}
+
+// ---------- messages from the extension ----------
+const PANEL_MESSAGES = new Set(["openChat", "showChat", "closeChat", "chatTitle"]); // about chats, not inside one
+function onMessage(m) {
+  if (m.chat && !PANEL_MESSAGES.has(m.type)) return inChat(m.chat, () => handle(m));
+  handle(m);
+}
+
+function handle(m) {
+  switch (m.type) {
+    case "chats":
+      synced = true;
+      for (const c of m.chats) (chats.get(c.key) || makeChat(c.key)).title = c.title;
+      showChat(m.active);
+      return renderTabs();
+    case "openChat": if (!chats.has(m.chat)) makeChat(m.chat); return;
+    case "showChat": return showChat(m.chat);
+    case "closeChat": return closeChat(m.chat);
+    case "chatTitle": { const c = chats.get(m.chat); if (c) { c.title = m.title; renderTabs(); } return; }
+    case "tasks": cur.tasks = m.tasks; renderTasks(); return renderTabs();
+    case "taskEvent": return taskEvent(m);
+    case "autoTurn": if (!turn) startTurn(null); setBusy(true); working(true); return;
+    case "queue": cur.queue = (m.items || []).map((p) => ({ images: [], items: [], chips: [], ...p })); return renderQueue();
+    case "context": cur.context = { used: m.used, window: m.window, threshold: m.threshold }; return renderMeter();
+    case "notice": return eventRow(h("div", { class: "task-event notice" }, icon(m.icon || "info"), h("span", { class: "grow" }, m.text)), m.icon === "fold");
+    case "shell": return eventRow(h("div", { class: "task-event shell" },
+      h("div", { class: "shell-head" }, icon("terminal"), h("code", { class: "grow ellipsis", title: m.command }, "$ " + m.command),
+        h("span", { class: m.code === 0 ? "ok" : "del" }, m.code === 0 ? "exit 0" : `exit ${m.code}`), h("span", { class: "muted small" }, "· goes with your next message")),
+      m.output && h("pre", {}, m.output)), true);
+    case "btw": return eventRow(h("div", { class: "task-event btw", "data-btw": m.id },
+      h("div", { class: "shell-head" }, icon("comment"), h("b", {}, "btw"), h("span", { class: "grow ellipsis", title: m.text }, m.text), icon("loading", "spin"),
+        h("button", { class: "icon-btn", title: "Dismiss", onclick: (e) => e.target.closest(".btw").remove() }, icon("close")))), true);
+    case "btwAnswer": {
+      const el = document.querySelector(`[data-btw="${CSS.escape(m.id)}"]`);
+      if (!el) return;
+      $(".spin", el)?.remove();
+      el.append(m.error ? h("div", { class: "del small" }, m.error) : h("div", { class: "md", html: md(m.answer) }));
+      return scrollDown();
+    }
+    case "status": if (turn) working(true, m.text); return;
+    case "fileResults": if (mention && m.q === mention.q) { mention.items = m.items; mention.index = 0; renderSlash(); } return;
+    case "agentProgress": { const row = stepRow(m.toolUseId); if (row && m.text) row.title = m.text; return; }
+    case "settings": Object.assign(S, { model: m.model, effort: m.effort, ultracode: m.ultracode, mode: m.mode, policy: m.policy, agents: m.agents || [] }); return renderToolbar();
+    case "init": S.models = m.models; S.commands = m.commands; return renderToolbar();
+    case "usage": S.usage = m.usage; S.plan = m.plan; return renderUsage();
+    case "showUsage": renderUsage(); usageCard.classList.toggle("hidden"); return;
+    case "activeFile": S.active = m.file; return renderChips();
+    case "addContext": return addItems(m.items);
+    case "quickAction": { // Explain / Fix / Tests or a code block's Apply: sent as is, the draft in the input stays
+      if (cur.loading) return;
+      const items = m.items.map((it) => ({ ...it, range: it.kind === "selection" ? `${it.start}-${it.end}` : "" }));
+      const p = { text: m.text, images: [], items, useActive: false, chips: items };
+      if (S.busy) { cur.queue.push(p); renderQueue(); } else dispatch(p);
+      return;
+    }
+    case "planText": { // approved after editing: show what is being built
+      const el = document.querySelector(`[data-plan="${CSS.escape(m.id)}"]`);
+      if (el) { el.querySelector(".md").innerHTML = md(m.plan); el.querySelector(".card-title").lastChild.textContent = "Proposed plan (edited)"; }
+      return;
+    }
+    case "insertText": input.setRangeText(m.text, input.selectionStart, input.selectionEnd, "end"); input.focus(); return autosize();
+    case "sessions": S.sessions = m.items; S.pinned = m.pinned || []; return renderEmpty();
+    case "text": return addText(m.text);
+    case "textStart": if (turn) turn.text = null; return; // a new text block is a new paragraph, not a continuation
+    case "thinkingStart": return addThinking();
+    case "thinking": return addThinkingText(m.text);
+    case "tool": return addStep(m);
+    case "toolResult": return stepResult(m);
+    case "stepUndone": {
+      const row = stepRow(m.id), btn = row && $(".undo-step", row.parentElement);
+      if (!row) return;
+      row.classList.add("undone");
+      $(".meta", row).prepend(h("span", { class: "muted" }, "undone · "));
+      if (btn) { btn.disabled = true; btn.replaceChildren(icon("check"), h("span", {}, "Undone")); }
+      return;
+    }
+    case "todos": S.todos = m.todos; return renderTodos();
+    case "suggestion": if (cur.busy) return; cur.suggestion = m.text; return cur === shown && setPlaceholder();
+    case "changes": cur.changes = m.files; return cur === shown && renderChanges();
+    case "permission":
+      permissionCard(m);
+      if (cur !== shown) { cur.attention = true; renderTabs(); } // waiting on the user in a background chat
+      return;
+    case "error": return errorBox(m.text);
+    case "done":
+      finalize(m.ms);
+      setBusy(false);
+      if (cur.queue.length) { dispatch(cur.queue.shift()); return renderQueue(); } // next queued message
+      if (cur === shown) input.focus();
+      else { cur.unread = true; renderTabs(); }
+      return;
+    case "user": return startTurn({ text: m.text, chips: m.chips || [], images: m.images || [] }, m.checkpoint ? { checkpoint: m.checkpoint, text: m.text, chips: m.chips || [], items: [], images: m.images || [], useActive: false } : null);
+    case "editCancelled": {
+      if (cur.editing) cur.editing.sent = null; // keep editing
+      return;
+    }
+    case "approvalsCancelled":
+      for (const a of scroll.querySelectorAll(".permission .actions")) closeCard(a, "Cancelled");
+      return;
+    case "answered": // from @clawd in Copilot's chat panel
+      for (const a of scroll.querySelectorAll(`.permission .actions[data-perm="${CSS.escape(m.id)}"]`)) closeCard(a, icon(m.allow ? "check" : "close"), m.allow ? "Allowed" : "Rejected");
+      return;
+    case "redone":
+      if (!redo) return;
+      scroll.append(...redo.stack.pop());
+      if (redo.stack.length) renderRedo(); // another restore can still be redone
+      else dropRedo();
+      setDraft(cur, "", []);
+      showEmpty(false);
+      return scrollDown(true);
+    case "restored": {
+      finalize();
+      const at = scroll.querySelector(`.turn[data-checkpoint="${m.checkpoint}"]`);
+      if (!at) return;
+      const payload = at.payload;
+      const nodes = [];
+      for (let el = at; el; ) { const next = el.nextElementSibling; el.remove(); nodes.push(el); el = next; }
+      redo?.bar.remove(); // removed with the messages if it sat among them; it goes back at the end
+      redo ||= { stack: [], bar: h("div", { class: "redo-bar" }) };
+      redo.stack.push(nodes.filter((n) => n !== redo.bar));
+      renderRedo();
+      if (m.resend != null && payload) {
+        dropRedo(); // an edit starts a new branch, nothing to redo
+        S.todos = [];
+        renderTodos();
+        showEmpty(false);
+        const sent = cur.editing?.checkpoint === m.checkpoint && cur.editing.sent;
+        if (sent) { const { prev } = cur.editing; endEdit(); cur === shown ? fillComposer(prev.text, prev.items, prev.images) : (cur.draft = { ...cur.draft, ...prev }); }
+        dispatch(sent || { ...payload, text: m.resend, chips: payload.chips || [] });
+        return;
+      }
+      if (payload) setDraft(cur, payload.text === "See the attached image." ? "" : payload.text, payload.items || []);
+      S.todos = [];
+      renderTodos();
+      showEmpty(!scroll.querySelector(".turn"));
+      return;
+    }
+    case "loading":
+      cur.loading = true;
+      scroll.append(loadingScreen(m.title));
+      showEmpty(false);
+      return;
+    case "replay":
+      for (const item of m.items) handle(item);
+      finalize();
+      cur.loading = false;
+      cur.more = m.more;
+      scroll.querySelector(".loading-chat")?.remove();
+      showEmpty(!scroll.querySelector(".turn"));
+      scrollDown(true);
+      return fillOlder(cur);
+    case "older": { // a page further up: rendered apart, then slipped in on top without moving what's on screen
+      const pane = scroll, last = turn;
+      scroll = h("div");
+      turn = null;
+      try { for (const item of m.items) if (item.type !== "todos") handle(item); finalize(); } // its todo lists are long done
+      finally {
+        const page = scroll;
+        scroll = pane;
+        turn = last;
+        keepPlace(pane, () => { pane.querySelector(".older-loading")?.remove(); pane.prepend(...page.children); });
+      }
+      cur.more = m.more;
+      cur.olderPending = false;
+      if (cur.jumpUp) { cur.jumpUp = false; if (cur === shown) jumpTurn(true); } // Alt+↑ asked for the message above these
+      if (cur === shown && !findBar.classList.contains("hidden")) { runFind(true); loadOlder(cur, true); } // find searches the whole chat
+      return fillOlder(cur);
+    }
+    case "tabState": return vscode.setState({ ...vscode.getState(), sessionId: m.sessionId }); // an editor tab reopens this chat after a reload
+    case "draft": { // the unsent message from before a reload; never over something typed since
+      const images = (m.images || []).map((i) => ({ ...i, url: `data:${i.mediaType};base64,${i.data}` }));
+      if (cur !== shown) { if (!cur.draft.text && !cur.draft.images.length) cur.draft = { ...cur.draft, text: m.text || "", items: m.items || [], images }; }
+      else if (!input.value && !S.images.length) fillComposer(m.text || "", m.items || [], images);
+      return;
+    }
+    case "clear":
+      cur.loading = false;
+      cur.more = cur.olderPending = false;
+      redo = null;
+      turn = null;
+      scroll.replaceChildren(...(cur === shown ? [empty] : []));
+      showEmpty(true);
+      S.todos = [];
+      renderTodos();
+      cur.queue = [];
+      renderQueue();
+      setBusy(false);
+      return;
+  }
+}
+window.addEventListener("message", (e) => onMessage(e.data));
+
+// ---------- overlay scrollbar for the chat: appears while scrolling, fades out, draggable ----------
+const thumb = h("div", { class: "overlay-thumb", "aria-hidden": "true" });
+document.body.append(thumb);
+let fadeTimer;
+function placeThumb() {
+  const r = scroll.getBoundingClientRect();
+  const max = scroll.scrollHeight - scroll.clientHeight;
+  if (max <= 1) { thumb.style.display = "none"; return; }
+  const height = Math.max(28, r.height * (scroll.clientHeight / scroll.scrollHeight));
+  thumb.style.display = "";
+  thumb.style.height = height + "px";
+  thumb.style.top = r.top + (r.height - height) * (scroll.scrollTop / max) + "px";
+  thumb.style.left = r.right - 9 + "px";
+}
+function flashThumb() {
+  placeThumb();
+  thumb.classList.add("show");
+  clearTimeout(fadeTimer);
+  fadeTimer = setTimeout(() => thumb.classList.remove("show"), 900);
+}
+window.addEventListener("resize", placeThumb);
+const paneResize = new ResizeObserver(placeThumb); // chat panes observe it as they're made
+thumb.addEventListener("mousedown", (e) => {
+  e.preventDefault();
+  const startY = e.clientY, startTop = scroll.scrollTop;
+  const ratio = scroll.scrollHeight / scroll.clientHeight;
+  thumb.classList.add("dragging");
+  const move = (ev) => { scroll.scrollTop = startTop + (ev.clientY - startY) * ratio; };
+  const up = () => { thumb.classList.remove("dragging"); window.removeEventListener("mousemove", move); window.removeEventListener("mouseup", up); flashThumb(); };
+  window.addEventListener("mousemove", move);
+  window.addEventListener("mouseup", up);
+});
+
+// ---------- find in chat (Ctrl+F) ----------
+const findInput = h("input", { type: "text", placeholder: "Find in chat", "aria-label": "Find in chat" });
+const findCount = h("span", { class: "muted small find-count" });
+const findBar = h("div", { class: "find-bar hidden", role: "search" }, icon("search", "muted"), findInput, findCount,
+  h("button", { class: "icon-btn", title: "Previous match (Shift+Enter)", onclick: () => stepFind(-1) }, icon("arrow-up")),
+  h("button", { class: "icon-btn", title: "Next match (Enter)", onclick: () => stepFind(1) }, icon("arrow-down")),
+  h("button", { class: "icon-btn", title: "Close (Escape)", onclick: () => closeFind() }, icon("close")));
+document.body.append(findBar);
+let hits = [], hitAt = -1;
+
+function openFind() {
+  const r = shown.el.getBoundingClientRect();
+  findBar.style.top = r.top + 6 + "px";
+  findBar.style.right = window.innerWidth - r.right + 14 + "px";
+  findBar.classList.remove("hidden");
+  const sel = getSelection().toString().trim();
+  if (sel && !sel.includes("\n")) findInput.value = sel;
+  findInput.select();
+  findInput.focus();
+  loadOlder(shown, true); // the pages not loaded yet; the search reruns as they arrive
+  runFind();
+}
+
+function clearHits() {
+  for (const m of hits) if (m.isConnected) { const p = m.parentNode; m.replaceWith(...m.childNodes); p.normalize(); }
+  hits = [];
+  hitAt = -1;
+}
+
+function closeFind() {
+  if (findBar.classList.contains("hidden")) return;
+  clearHits();
+  findBar.classList.add("hidden");
+}
+
+// Mark every match in the chat on screen. ponytail: a match split across highlight spans (code) isn't found.
+function runFind(keep) {
+  const before = hits.length - hitAt; // keep: stay on the same match as earlier messages come in on top
+  clearHits();
+  const q = findInput.value.toLowerCase();
+  if (q) {
+    const walk = document.createTreeWalker(shown.el, NodeFilter.SHOW_TEXT, {
+      acceptNode: (n) => n.parentElement.closest(".hidden, .older-loading") ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT });
+    const nodes = [];
+    while (walk.nextNode()) nodes.push(walk.currentNode);
+    for (let node of nodes) {
+      for (let at = node.data.toLowerCase().indexOf(q); at >= 0; at = node.data.toLowerCase().indexOf(q)) {
+        const hit = node.splitText(at);
+        node = hit.splitText(q.length);
+        const mark = h("mark", { class: "find-hit" });
+        hit.replaceWith(mark);
+        mark.append(hit);
+        hits.push(mark);
+      }
+    }
+  }
+  hitAt = !hits.length ? -1 : keep && before <= hits.length ? hits.length - before : hits.length - 1; // the latest match first
+  showHit(!keep);
+}
+
+function stepFind(d) {
+  if (!hits.length) return;
+  hitAt = (hitAt + d + hits.length) % hits.length;
+  showHit(true);
+}
+
+function showHit(jump) {
+  hits.forEach((m, i) => m.classList.toggle("current", i === hitAt));
+  findCount.textContent = findInput.value ? `${hits.length ? hitAt + 1 : 0}/${hits.length}` : "";
+  if (jump && hits[hitAt]) reveal(hits[hitAt]);
+}
+
+let findTimer;
+findInput.addEventListener("input", () => { clearTimeout(findTimer); findTimer = setTimeout(() => runFind(), 150); });
+findInput.addEventListener("keydown", (e) => {
+  if (e.key === "Enter") { e.preventDefault(); stepFind(e.shiftKey ? -1 : 1); }
+  if (e.key === "Escape") { e.stopPropagation(); closeFind(); input.focus(); }
+});
+document.addEventListener("keydown", (e) => {
+  if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "f") { e.preventDefault(); openFind(); }
+  if (e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey && (e.key === "ArrowUp" || e.key === "ArrowDown") && shown) {
+    e.preventDefault();
+    jumpTurn(e.key === "ArrowUp");
+  }
+});
+
+// ---------- minimap: ticks beside the scrollbar for messages, edits, errors and questions; a click jumps there ----------
+const minimap = h("div", { class: "minimap", "aria-hidden": "true" });
+document.body.append(minimap);
+let mapTimer;
+function drawSoon() { clearTimeout(mapTimer); mapTimer = setTimeout(drawMinimap, 250); }
+function drawMinimap() {
+  const pane = shown?.el;
+  if (!pane || pane.scrollHeight <= pane.clientHeight + 1) return minimap.replaceChildren();
+  const r = pane.getBoundingClientRect();
+  Object.assign(minimap.style, { top: r.top + "px", left: r.right - 4 + "px", height: r.height + "px" });
+  const ticks = [];
+  // Placed at its turn's top: measuring inside an off-screen turn would force it out of content-visibility skipping.
+  const tick = (el, kind, title) => {
+    const y = (el.closest(".turn") || el).getBoundingClientRect().top - r.top + pane.scrollTop;
+    const t = h("div", { class: `tick ${kind}`, title, onclick: () => reveal(el) });
+    t.style.top = (y / pane.scrollHeight) * r.height + "px";
+    ticks.push(t);
+  };
+  pane.querySelectorAll(".user-msg").forEach((e) => tick(e, "user", e.textContent.trim().slice(0, 80)));
+  pane.querySelectorAll(".step-box").forEach((b) => b.stepEdit && tick(b.firstElementChild, "edit", b.firstElementChild.textContent.trim()));
+  pane.querySelectorAll(".step.error, .error-box").forEach((e) => tick(e, "error", e.textContent.trim().slice(0, 80)));
+  pane.querySelectorAll(".permission").forEach((e) => tick(e, "ask", $(".card-title", e)?.textContent.trim() || "Approval"));
+  minimap.replaceChildren(...ticks);
+}
+window.addEventListener("resize", drawSoon);
+document.addEventListener("toggle", drawSoon, true); // folding moves everything below
+
+// ---------- boot ----------
+showChat(document.body.dataset.chat || "c1"); // the chat this view opens on; "chats" on ready brings any others
+renderEmpty();
+renderToolbar();
+renderChips();
+send({ type: "ready" });
+input.focus();
