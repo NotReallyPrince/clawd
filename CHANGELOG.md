@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.0.3
+
+- **Cleaner `/compact`:** a `/compact` message no longer shows the edit, retry or restore-checkpoint buttons, because
+  there is nothing to edit, retry or undo. The "Conversation compacted" notice stays.
+- **Fix:** a chat no longer disappears from history after Undo, Restore or a compaction makes a new copy that has
+  no message of its own yet. The chat stays listed, and its pin stays put, until you send something in the copy.
+- **Agent Changes view:** files waiting for Keep or Undo now show in their own "Agent Changes" section of the
+  Source Control sidebar, with each file's folder and +/− counts, instead of as a "Clawd" repository among your git
+  repos. Keep or Undo a file inline, or all of them from the section's title (Undo All asks first).
+- **Browser tools switch:** turn Claude's browser tools on or off from the model menu, under Ultracode, instead of in
+  Settings. A globe next to the model name shows they're on. It applies to every chat from its next message, and
+  turning it back on returns to the window or headless mode you had.
+- **Fewer compactions:** chats now compact on their own at 500k tokens instead of 200k. At 200k, the ~30–90k that
+  every chat starts with left so little room that long chats compacted every few dozen replies. Change it under
+  Settings → Clawd: Auto Compact At.
+
 ## 1.0.2
 
 - **Crowned logo:** the Bracket Crab now wears a gold crown with a small gap above its head, and has shaded legs.

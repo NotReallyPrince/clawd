@@ -33,7 +33,7 @@ const vscode = {
     fs: { stat: async (u) => ({ type: fs.statSync(u.fsPath).isDirectory() ? 2 : 1 }) },
     findFiles: async () => [],
     createFileSystemWatcher: () => ({ onDidCreate() {}, onDidChange() {}, onDidDelete() {}, dispose() {} }),
-    saveAll: async () => true,
+    saveAll: async () => true, asRelativePath: (p) => p,
   },
   window: {
     activeTextEditor: null, visibleTextEditors: [], tabGroups: { all: [] },
@@ -344,6 +344,24 @@ const said = (p) => p.filter((m) => m.type === "text").map((m) => m.text).join("
     fs.rmSync(file);
     try { fs.rmdirSync(dir); } catch {}
     console.log("rename + search ok");
+  }
+
+  // a newer copy with no prompt yet (a restore to the compaction summary) must not hide the chat it was forked from
+  {
+    const dir = fs.mkdtempSync(path.join(require("os").tmpdir(), "clawd-copies-"));
+    const summary = { type: "user", uuid: "s1", isCompactSummary: true, message: { role: "user", content: "This session is being continued…" } };
+    const write = (id, ...extra) => { fs.writeFileSync(path.join(dir, id + ".jsonl"), [summary, ...extra].map((e) => JSON.stringify(e)).join("\n") + "\n"); return { id, file: path.join(dir, id + ".jsonl") }; };
+    const real = { ...write("real", { type: "user", message: { role: "user", content: "fix the pricing page" } }), time: 1000, born: 100 };
+    const empty = { ...write("empty"), time: 2100, born: 2000 };
+    let moved = new Map();
+    assert.deepStrictEqual(ext.latestCopies([empty, real], moved).map((s) => s.id), ["empty", "real"], "the chat stays listed");
+    assert.strictEqual(moved.size, 0, "and its pin stays put");
+    write("empty", { type: "user", message: { role: "user", content: "start again from here" } });
+    moved = new Map();
+    assert.deepStrictEqual(ext.latestCopies([empty, real], moved).map((s) => s.id), ["empty"], "once the copy has a prompt it takes over");
+    assert.strictEqual(moved.get("real"), "empty");
+    fs.rmSync(dir, { recursive: true });
+    console.log("untitled copies ok");
   }
 
   // Keep/Undo only covers workspace files; scratch files elsewhere still get a checkpoint snapshot
@@ -719,11 +737,12 @@ const said = (p) => p.filter((m) => m.type === "text").map((m) => m.text).join("
     provider.edits.refresh();
     await new Promise((r) => setTimeout(r, 200));
     assert(provider.active.touched.has(f), "back in its chat's changed files");
-    assert.deepStrictEqual(scm?.group.resourceStates.map((s) => s.resourceUri.fsPath), [f], "listed in Source Control");
+    assert.deepStrictEqual(tree.getChildren().map((s) => s.resourceUri.fsPath), [f], "listed in Agent Changes");
     await provider.edits.undo([f]);
     assert.strictEqual(fs.readFileSync(f, "utf8"), "old\n", "Undo still works after the reload");
     await new Promise((r) => setTimeout(r, 200));
-    assert.strictEqual(scm, null, "Source Control entry goes away when nothing is left to review");
+    assert.strictEqual(tree.getChildren().length, 0, "Agent Changes empties when nothing is left to review");
+    assert.strictEqual(scm, undefined, "not a repository in Source Control");
     console.log("pending edits survive reload ok");
 
     // the unsent message survives a reload too

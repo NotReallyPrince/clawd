@@ -84,6 +84,9 @@ class EditTracker {
     this.snapshots = new Map(); // abs path -> original text (a Buffer if binary), or null if the agent created the file
     this.onChange = onChange; // (files) => void, for the chat's "N files changed" bar
     this.lensEmitter = new vscode.EventEmitter();
+    this.rows = [];
+    this.treeEmitter = new vscode.EventEmitter();
+    this.tree = { onDidChangeTreeData: this.treeEmitter.event, getTreeItem: (r) => r, getChildren: (r) => (r ? [] : this.rows) };
     this.added = vscode.window.createTextEditorDecorationType({
       isWholeLine: true,
       backgroundColor: new vscode.ThemeColor("diffEditor.insertedLineBackground"),
@@ -131,25 +134,28 @@ class EditTracker {
       vscode.commands.registerCommand("clawd.keepEditor", (uri) => { const f = (uri || vscode.window.activeTextEditor?.document.uri)?.fsPath; if (f) this.keep(f); }),
       vscode.commands.registerCommand("clawd.undoEditor", (uri) => { const f = (uri || vscode.window.activeTextEditor?.document.uri)?.fsPath; if (f) this.undo(f); }),
       // Source Control view: a row's or a group's inline Keep / Undo, for the clicked or selected rows
-      vscode.commands.registerCommand("clawd.scmKeep", (...a) => this.keep(scmFiles(a))),
-      vscode.commands.registerCommand("clawd.scmUndo", (...a) => this.undo(scmFiles(a))),
-      { dispose: () => this.sc?.dispose() },
+      // Agent Changes view: a row's inline Keep / Undo, for the clicked or selected rows; the title's, for all of them
+      vscode.commands.registerCommand("clawd.scmKeep", (...a) => { const f = scmFiles(a); this.keep(f.length ? f : undefined); }),
+      vscode.commands.registerCommand("clawd.scmUndo", async (...a) => {
+        const f = scmFiles(a);
+        if (f.length || await vscode.window.showWarningMessage(`Undo all ${this.snapshots.size} agent changes?`, { modal: true }, "Undo All")) this.undo(f.length ? f : undefined);
+      }),
+      this.view = vscode.window.createTreeView("clawd.changes", { treeDataProvider: this.tree, canSelectMany: true }),
     );
   }
 
-  // The files waiting for Keep / Undo also show in the Source Control view, while there are any.
+  // The files waiting for Keep / Undo, in their own "Agent Changes" section of the Source Control view (shown while
+  // there are any), not as a repository among the git ones.
   showInScm(files) {
-    if (!files.length) { this.sc?.dispose(); this.sc = null; return; }
-    if (!this.sc) {
-      this.sc = vscode.scm.createSourceControl("clawd", "Clawd");
-      this.group = this.sc.createResourceGroup("changes", "Agent changes");
-    }
-    this.sc.count = files.length;
-    this.group.resourceStates = files.map((f) => ({
+    this.rows = files.map((f) => ({
       resourceUri: vscode.Uri.file(f.file),
+      description: `${vscode.workspace.asRelativePath(path.dirname(f.file))}${f.created ? " · new" : f.deleted ? " · deleted" : f.binary ? "" : `  +${f.added} −${f.removed}`}`,
+      tooltip: f.created ? "Created by Clawd" : f.deleted ? "Deleted by Clawd" : f.binary ? "Changed by Clawd" : `Changed by Clawd: +${f.added} -${f.removed}`,
       command: { title: "Show changes", command: "clawd.diffFile", arguments: [f.file] },
-      decorations: { strikeThrough: f.deleted, tooltip: f.created ? "Created by Clawd" : f.deleted ? "Deleted by Clawd" : f.binary ? "Changed by Clawd" : `Changed by Clawd: +${f.added} -${f.removed}` },
     }));
+    this.treeEmitter.fire();
+    if (this.view) this.view.badge = files.length ? { value: files.length, tooltip: `${files.length} agent changes to review` } : undefined;
+    vscode.commands.executeCommand("setContext", "clawd.hasChanges", files.length > 0);
   }
 
   // Call before the agent writes a file; the first snapshot wins until kept or undone.

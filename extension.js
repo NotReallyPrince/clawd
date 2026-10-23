@@ -90,7 +90,7 @@ function claudeBin() {
 // When the CLI compacts on its own. By default it waits until the model's window is nearly full (~967k of 1M), far past
 // where long chats get slow and costly; CLAUDE_CODE_AUTO_COMPACT_WINDOW makes it compact at that size minus a summary buffer.
 function autoCompactAt() {
-  return vscode.workspace.getConfiguration("clawd").get("autoCompactAt") || "200000";
+  return vscode.workspace.getConfiguration("clawd").get("autoCompactAt") || "500000";
 }
 
 // One long-lived Claude Code CLI process speaking stream-json, resumable by session id.
@@ -111,6 +111,7 @@ class Claude {
     if (resume) args.push("--resume", resume);
     if (resume && resumeAt) args.push("--resume-session-at", resumeAt, "--fork-session"); // rewind: continue from that reply in a new branch
     const browser = cfg.get("browser");
+    this.browser = browser || "off";
     if (browser && browser !== "off") { // Clawd's own browser tools (browser-mcp.js), run on VS Code's Node, which has WebSocket
       this.browserState = path.join(os.tmpdir(), `clawd-browser-${process.pid}-${Math.random().toString(36).slice(2)}.json`); // where the live view finds the page
       const env = { ELECTRON_RUN_AS_NODE: "1", CLAWD_BROWSER: browser, CLAWD_STATE: this.browserState };
@@ -352,7 +353,7 @@ class Chat {
     const s = this.settings(), cfg = vscode.workspace.getConfiguration("clawd");
     if (this.claude && ((this.claude.effort || "") !== s.effort || this.claude.ultracode !== !!s.ultracode || this.claude.compactAt !== autoCompactAt()
       || this.claude.agentKey !== this.p.launchAgent(s.mode).key || this.claude.dirsKey !== (s.dirs || []).join("\n")
-      || this.claude.fallback !== (cfg.get("fallbackModel") || "") || this.claude.memory !== this.p.memoryStamp)) this.restart(); // launch flags, and CLAUDE.md is read at launch
+      || this.claude.fallback !== (cfg.get("fallbackModel") || "") || this.claude.browser !== (cfg.get("browser") || "off") ||this.claude.memory !== this.p.memoryStamp)) this.restart(); // launch flags, and CLAUDE.md is read at launch
     const claude = this.ensure();
     this.syncSettings();
     this.started = Date.now();
@@ -1211,7 +1212,8 @@ class ChatProvider {
       model: this.state.get("model", "default"),
       effort: this.state.get("effort", ""),
       ultracode: this.state.get("ultracode", false),
-      mode: this.state.get("mode", "agent").replace(/^plan$/, "agent"), // Plan mode is now part of Agent
+      browser: (vscode.workspace.getConfiguration("clawd").get("browser") || "off") !== "off", // for every chat, not one
+      mode:this.state.get("mode", "agent").replace(/^plan$/, "agent"), // Plan mode is now part of Agent
       policy: this.state.get("policy", vscode.workspace.getConfiguration("clawd").get("defaultPolicy")),
       agents: this.agents().map(({ value, label, description }) => ({ value, label, description })),
     };
@@ -1493,6 +1495,11 @@ class ChatProvider {
   }
 
   setSetting(key, value, c = this.active) {
+    if (key === "browser") { // the Browser switch flips Settings → Clawd → Browser, back to the window or headless it was on
+      const cfg = vscode.workspace.getConfiguration("clawd"), cur = cfg.get("browser") || "off";
+      if (!value && cur !== "off") this.state.update("browserMode", cur);
+      return cfg.update("browser", value ? this.state.get("browserMode", "window") : "off", vscode.ConfigurationTarget.Global);
+    }
     this.state.update(key, value); // also the starting point for new chats
     if (["model", "effort", "ultracode", "mode"].includes(key)) { c.prefs()[key] = value; c.savePrefs(); }
     if (key === "model" || key === "mode") c.syncSettings(); // the chat it was changed in (an editor tab's isn't the sidebar's)
@@ -2296,6 +2303,8 @@ function parseUserText(raw) {
 // stopped changing before a newer one was created (the chat moved on to the fork); two branches both still written
 // after the split, like the same conversation carried on in the terminal and in Clawd, are both kept.
 // `moved` gets each dropped id -> the newer file that replaced it, so a pin can follow the chat.
+// A newer file with no prompt yet (a compaction summary only, or a restore to it) has no title and isn't listed, so it
+// doesn't replace anything until one is sent there: otherwise the chat would vanish from the list.
 // ponytail: only the first 64 KB is read, so a first prompt longer than that (a pasted image) isn't matched.
 function latestCopies(list, moved = new Map()) {
   const firstPrompt = (file) => { try { return readLines(file, 0, 65536).map(parse).find((e) => e && ((e.isCompactSummary && typeof e.message?.content === "string") || userText(e))); } catch {} };
@@ -2303,13 +2312,13 @@ function latestCopies(list, moved = new Map()) {
   const older = new Map(); // id -> the newest file whose compaction summary names it
   for (const [s, f] of withFirst) {
     const old = f?.isCompactSummary && f.message.content.match(/transcript at: \S*?([0-9a-f-]{36})\.jsonl/)?.[1];
-    if (old && !older.has(old)) older.set(old, s.id);
+    if (old && !older.has(old) && sessionTitle(s.file)) older.set(old, s.id);
   }
-  const born = new Map(); // first prompt -> the newer files' ids and creation times (0: the filesystem has none, so any is a copy)
+  const born = new Map(); // first prompt -> the newer files' ids, files and creation times (0: the filesystem has none, so any is a copy)
   return withFirst.filter(([s, f]) => {
     const newer = born.get(f?.uuid) || [];
-    const by = older.get(s.id) || newer.find((n) => !n.born || n.born >= s.time - 5000)?.id;
-    if (f?.uuid) born.set(f.uuid, [...newer, { id: s.id, born: s.born || 0 }]);
+    const by = older.get(s.id) || newer.find((n) => (!n.born || n.born >= s.time - 5000) && sessionTitle(n.file))?.id;
+    if (f?.uuid) born.set(f.uuid, [...newer, { id: s.id, file: s.file, born: s.born || 0 }]);
     if (by) moved.set(s.id, by);
     return !by;
   }).map(([s]) => s);
@@ -2671,6 +2680,8 @@ function activate(context) {
   context.subscriptions.push({ dispose: () => clearInterval(poll) });
   if (vscode.window.onDidChangeWindowState) context.subscriptions.push(vscode.window.onDidChangeWindowState((s) => s.focused && provider.fetchUsage()));
   context.subscriptions.push(status, vscode.commands.registerCommand("clawd.showUsage", () => provider.showUsage()));
+  if (vscode.workspace.onDidChangeConfiguration) context.subscriptions.push(vscode.workspace.onDidChangeConfiguration((e) => e.affectsConfiguration("clawd.browser")
+    && new Set([provider.active, ...provider.chats.values()]).forEach((c) => c?.postSettings()))); // the switch follows Settings
   const work = vscode.window.createStatusBarItem("clawd.work", vscode.StatusBarAlignment.Right, 101);
   work.name = "Clawd Activity";
   work.command = "clawd.showWorking";
@@ -2731,4 +2742,4 @@ function activate(context) {
   return provider;
 }
 
-module.exports = { activate, applyEdit, replay, sessionTitle, describeTool, parseUserText, editStats, lastUsage, searchSessions, chatMarkdown, git, riskyEdit, diffRows, pageStart, stepBefore };
+module.exports = { activate, applyEdit, replay, sessionTitle, latestCopies, describeTool, parseUserText, editStats, lastUsage, searchSessions, chatMarkdown, git, riskyEdit, diffRows, pageStart, stepBefore };

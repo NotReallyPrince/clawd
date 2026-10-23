@@ -233,7 +233,8 @@ function renderToolbar() {
   const model = currentModel();
   const name = model.value === "default" && model.description ? model.description.split(" · ")[0] : (model.displayName || model.value);
   modelBtn.replaceChildren(name, S.effort && h("span", { class: "muted" }, EFFORT_LABEL[S.effort] || S.effort),
-    S.ultracode ? h("span", { class: "muted", title: "Ultracode on" }, icon("rocket")) : "", icon("chevron-down", "chev"));
+    S.ultracode ? h("span", { class: "muted", title: "Ultracode on" }, icon("rocket")) : "",
+    S.browser ? h("span", { class: "muted", title: "Browser tools on" }, icon("globe")) : "", icon("chevron-down", "chev"));
   const policy = POLICIES.find((p) => p.value === S.policy) || POLICIES[0];
   policyBtn.replaceChildren(icon(policy.icon), policy.label, icon("chevron-down", "chev"));
   policyBtn.classList.toggle("danger", S.policy === "bypass");
@@ -269,6 +270,9 @@ modelBtn.onclick = () => {
     // the CLI's `ultracode` setting: big tasks run as multi-agent workflows, at any effort
     { value: "ultracode", label: "Ultracode", icon: "rocket", title: "Big tasks run as several agents in parallel (uses many more tokens)",
       toggle: !!S.ultracode, onToggle: (on) => setSetting("ultracode", on) },
+    // Settings → Clawd → Browser, for every chat; running chats switch on their next message
+    { value: "browser", label: "Browser tools", icon: "globe", title: "Let Claude open and use web pages in its own Chrome (every chat, from the next message)",
+      toggle: !!S.browser, onToggle: (on) => setSetting("browser", on) },
     more.length && { sep: true },
     more.length && { value: "more", label: "More models", sub: {
       options: more.map((m) => ({ value: m.value, label: m.displayName || m.value, title: m.description })), current: cur, onPick: pick } },
@@ -559,10 +563,12 @@ function ago(t) {
   for (const [n, u] of [[86400 * 30, "mo"], [86400 * 7, "w"], [86400, "d"], [3600, "h"], [60, "m"]]) if (s >= n) return `${Math.floor(s / n)}${u} ago`;
 }
 
+const isCompact = (text) => /^\s*\/compact\b/.test(text || "");
+
 function userBubble({ text, chips: c = [], images = [] }, checkpoint) {
   const textEl = h("div", { class: "user-text" }, text);
   const bubble = h("div", { class: "user-msg" },
-    checkpoint && h("button", { class: "icon-btn edit-btn", title: "Edit message", onclick: () => editMessage(bubble, checkpoint) }, icon("edit")),
+    checkpoint && !isCompact(text) && h("button", { class: "icon-btn edit-btn", title: "Edit message", onclick: () => editMessage(bubble, checkpoint) }, icon("edit")),
     c.length || images.length ? h("div", { class: "chips" }, c.map((x) => chip(x)), images.map((img, i) => imageChip(img, images.length > 1 ? i + 1 : 1))) : null,
     textEl);
   bubble.images = images; // "Copy message" carries them along
@@ -899,16 +905,17 @@ function finalize(ms) {
     s.classList.remove("running"); $(".status", s).replaceChildren(icon("circle-slash")); }
   const answer = [...t.body.querySelectorAll(":scope > .md")].map((e) => e.raw).join("\n\n");
   if (answer || t.payload) {
-    const cp = t.payload?.checkpoint;
+    // /compact has nothing to retry or restore: it only folds the history, so it gets no message actions
+    const payload = isCompact(t.payload?.text) ? null : t.payload, cp = payload?.checkpoint;
     // above a trailing notice (a compaction between replies), so the actions stay with the answer
-    const actions = h("div", { class: "msg-actions" },
+    const actions = (answer || payload) && h("div", { class: "msg-actions" },
       answer && h("button", { class: "icon-btn", title: "Copy answer", onclick: () => send({ type: "copy", text: answer }) }, icon("copy")),
       // Retry rewinds to before this message and runs it again in place, instead of sending a duplicate.
-      t.payload && h("button", { class: "icon-btn", title: "Retry this message", onclick: () => { if (!S.busy) cp ? send({ type: "editMessage", checkpoint: cp, text: t.payload.text, retry: true }) : dispatch(t.payload); } }, icon("refresh")),
+      payload && h("button", { class: "icon-btn", title: "Retry this message", onclick: () => { if (!S.busy) cp ? send({ type: "editMessage", checkpoint: cp, text: t.payload.text, retry: true }) : dispatch(t.payload); } }, icon("refresh")),
       cp && h("button", { class: "icon-btn restore-btn", title: "Restore checkpoint: undo this message's file changes and remove it and everything after", onclick: () => !S.busy && send({ type: "restore", checkpoint: cp }) }, icon("discard")));
     let first = t.body.lastElementChild;
     while (first?.previousElementSibling?.matches(".notice") && first.matches(".notice")) first = first.previousElementSibling;
-    first?.matches(".notice") ? first.before(actions) : t.body.append(actions);
+    if (actions) first?.matches(".notice") ? first.before(actions) : t.body.append(actions);
   }
   turnChanges(t);
 }
@@ -1512,7 +1519,7 @@ function handle(m) {
     case "status": if (turn) working(true, m.text); return;
     case "fileResults": if (mention && m.q === mention.q) { mention.items = m.items; mention.index = 0; renderSlash(); } return;
     case "agentProgress": { const row = stepRow(m.toolUseId); if (row && m.text) row.title = m.text; return; }
-    case "settings": Object.assign(S, { model: m.model, effort: m.effort, ultracode: m.ultracode, mode: m.mode, policy: m.policy, agents: m.agents || [] }); return renderToolbar();
+    case "settings": Object.assign(S, { model: m.model, effort: m.effort, ultracode: m.ultracode, browser: m.browser, mode: m.mode, policy: m.policy, agents: m.agents || [] }); return renderToolbar();
     case "init": S.models = m.models; S.commands = m.commands; return renderToolbar();
     case "usage": S.usage = m.usage; S.plan = m.plan; return renderUsage();
     case "showUsage": renderUsage(); usageCard.classList.toggle("hidden"); return;
