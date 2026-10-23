@@ -448,8 +448,12 @@ const said = (p) => p.filter((m) => m.type === "text").map((m) => m.text).join("
     const cfg = fs.mkdtempSync(path.join(require("os").tmpdir(), "bs-cfg-")), noFetch = global.fetch, oldDir = process.env.CLAUDE_CONFIG_DIR, calls = [];
     fs.writeFileSync(path.join(cfg, ".credentials.json"), JSON.stringify({ claudeAiOauth: { accessToken: "tok", expiresAt: Date.now() + 3600e3 } }));
     process.env.CLAUDE_CONFIG_DIR = cfg;
+    const usageCfg = vscode.workspace.getConfiguration;
     global.fetch = async (url, o) => { calls.push([url, o.headers.Authorization]); return { ok: true, json: async () => ({
       five_hour: { utilization: 81, resets_at: "2026-10-05T09:20:00+00:00" }, seven_day: { utilization: 100, resets_at: "2026-10-09T19:00:00+00:00" }, extra_usage: { is_enabled: false } }) }; };
+    await provider.fetchUsage(true);
+    assert.strictEqual(calls.length, 0, "no request unless clawd.pollUsage is on");
+    vscode.workspace.getConfiguration = () => ({ get: (k) => (k === "pollUsage" ? true : usageCfg().get(k)) });
     await provider.fetchUsage(true);
     await provider.fetchUsage(); // just updated: no second request
     assert.deepStrictEqual(calls, [["https://api.anthropic.com/api/oauth/usage", "Bearer tok"]]);
@@ -463,7 +467,7 @@ const said = (p) => p.filter((m) => m.type === "text").map((m) => m.text).join("
     await provider.fetchUsage(true);
     assert.strictEqual(provider.usage, before); // offline keeps the last reading
     provider.usage = null; provider.updateUsage();
-    global.fetch = noFetch;
+    global.fetch = noFetch; vscode.workspace.getConfiguration = usageCfg;
     if (oldDir == null) delete process.env.CLAUDE_CONFIG_DIR; else process.env.CLAUDE_CONFIG_DIR = oldDir;
     fs.rmSync(cfg, { recursive: true });
     console.log("usage refresh ok");

@@ -13,7 +13,7 @@
   <img src="https://img.shields.io/badge/VS%20Code-1.94%2B-007ACC?logo=visualstudiocode&logoColor=white" alt="VS Code 1.94+">
   <img src="https://img.shields.io/badge/powered%20by-Claude%20Code-D97757?logo=anthropic&logoColor=white" alt="Powered by Claude Code">
   <img src="https://img.shields.io/badge/dependencies-none-2ea043" alt="No dependencies">
-  <img src="https://img.shields.io/badge/use-personal-6e7681" alt="Personal use">
+  <img src="https://img.shields.io/badge/license-MIT-6e7681" alt="MIT license">
 </p>
 
 <p align="center">
@@ -22,18 +22,31 @@
 
 Clawd is a coding agent for VS Code's secondary sidebar, powered by your local **Claude Code CLI** and its login.
 
-Clawd has no API key of its own. Its only direct request is reading your plan usage, with the login Claude Code already has. Everything runs through the `claude` command you already use in the terminal, so sessions, skills, hooks, MCP servers and `CLAUDE.md` are shared with it. A chat started in Clawd shows up in `claude --resume`, and the other way round.
+Clawd has no API key, server or account of its own. Everything runs through the `claude` command you already use in the terminal, with your own Claude Code install and your own login, so sessions, skills, hooks, MCP servers and `CLAUDE.md` are shared with it. A chat started in Clawd shows up in `claude --resume`, and the other way round.
 
-> Personal use only. It runs on your own Claude login and rate limits. If it is ever shared with other people, it must be changed to use each user's own API key.
+> Clawd is an independent project, not made or endorsed by Anthropic. Your usage counts against your own Claude plan or API account, under the terms you agreed to with Anthropic. Clawd sends nothing anywhere itself, unless you turn on **`clawd.pollUsage`** (see [Settings](#settings)).
 
 ## Requirements
 
 - VS Code **1.94** or newer
 - [Claude Code](https://docs.anthropic.com/en/docs/claude-code) installed and logged in (run `claude` once in a terminal)
-- Node.js, only to build the `.vsix`
 - Git, for the commit-message button and for undoing changes made by commands
 
 ## Install
+
+From the Marketplace: open the Extensions view, search for **Clawd**, and install *Clawd — Agent Sidebar for Claude Code*. Or run:
+
+```bash
+code --install-extension prince-terabits.clawd
+```
+
+The Clawd icon appears in the secondary sidebar, on the right. Open it with **Ctrl+Shift+Alt+I** (**Cmd+Shift+Alt+I** on a Mac).
+
+If `claude` is not on your `PATH`, set **Settings → Clawd → Claude Path** to its full path, for example `~/.local/bin/claude`.
+
+### From source
+
+Needs Node.js to build the `.vsix`:
 
 ```bash
 git clone https://github.com/prince-terabits/clawd.git
@@ -42,11 +55,7 @@ npx --yes @vscode/vsce package
 code --install-extension clawd-*.vsix --force
 ```
 
-Then run **Developer: Reload Window**. The Clawd icon appears in the secondary sidebar, on the right. Open it with **Ctrl+Shift+Alt+I** (**Cmd+Shift+Alt+I** on a Mac).
-
-If `claude` is not on your `PATH`, set **Settings → Clawd → Claude Path** to its full path, for example `~/.local/bin/claude`.
-
-### Update
+Then run **Developer: Reload Window**. To update a source install:
 
 ```bash
 cd clawd && git pull
@@ -66,6 +75,14 @@ Then reload the window.
   <tr>
     <td align="center"><img src="docs/background.png" alt="Background agents and a running server"><br><sub><b>Background work:</b> agents and servers keep running, with their steps nested</sub></td>
     <td align="center"><img src="docs/usage.png" alt="Plan usage card"><br><sub><b>Usage:</b> your 5-hour and weekly Claude limits at a glance</sub></td>
+  </tr>
+  <tr>
+    <td align="center"><img src="docs/menu.png" alt="Model menu with effort, Ultracode and Browser tools switches"><br><sub><b>Model menu:</b> model, effort, and switches for Ultracode and browser tools</sub></td>
+    <td align="center"><img src="docs/slash.png" alt="Slash command menu"><br><sub><b>Commands:</b> type <code>/</code> for every Claude Code command and your skills</sub></td>
+  </tr>
+  <tr>
+    <td align="center"><img src="docs/browser.png" alt="Claude opening and checking a web page"><br><sub><b>Browser tools:</b> Claude opens, reads, clicks and checks pages in its own Chrome</sub></td>
+    <td align="center"><img src="docs/changes.png" alt="Changed files list with Keep and Undo"><br><sub><b>Review:</b> every changed file with its +/− counts; keep or undo them all or one by one</sub></td>
   </tr>
 </table>
 
@@ -104,15 +121,15 @@ Then reload the window.
 ### Controls
 
 - **Mode:** Agent or Plan. In Plan mode, Claude shows a plan card for you to approve first.
-- **Model** and **effort** pickers.
+- **Model menu:** model and effort, plus two switches: **Ultracode** (big tasks run as several agents in parallel) and **Browser tools** (turns Claude's Chrome on or off for every chat; a 🌐 next to the model name shows it's on).
 - **Approval policy:**
   - *Review* (default): edits are applied at once and you keep or undo them afterwards; commands ask first.
   - *Ask*: every edit shows a diff and waits for you. An **Allow all edits in this chat** button stops further asking for that chat.
   - *Bypass*: nothing asks.
   - Whatever the policy, an edit that could make something else run commands later always asks: anything under `.git/`, `.claude/`, `.vscode/`, `.husky/`, `.devcontainer/` or `.github/workflows/`, a shell startup file such as `.bashrc`, and any file outside the open folder (symlinks are followed) apart from scratch files in the temp directory. The card says why it asked, and "Allow all edits" doesn't cover these.
   - Clawd settings can only be set in your user settings, not by a repo's `.vscode/settings.json`.
-- **Context meter:** a ring that shows how full the context window is. Click it to run `/compact`.
-- **Usage in the status bar:** your 5-hour and weekly plan usage. A percentage appears from 70%, yellow at 80% and red at 95%. Click it for details. It refreshes every 2 minutes while VS Code is focused, so usage from other Claude sessions shows up too.
+- **Context meter:** a ring that shows how full the context window is. Click it to run `/compact`. Long chats compact on their own at about 500k tokens (**`clawd.autoCompactAt`**).
+- **Usage in the status bar:** your 5-hour and weekly plan usage, as Claude Code reports it with each reply. A percentage appears from 70%, yellow at 80% and red at 95%. Click it for details. Turn on **`clawd.pollUsage`** to also refresh it every 2 minutes, so usage from other Claude sessions shows up without sending a message.
 
 ### Watching Claude work
 
@@ -124,6 +141,7 @@ Then reload the window.
 ### Reviewing and undoing changes
 
 - **Keep or Undo** each change from the editor (per change or per file), from the changes panel above the input, or for all files at once.
+- **Agent Changes** in the Source Control sidebar lists every file waiting for review, with its folder and +/− counts, separate from your git repositories. Click a file for its diff; ✓ and ↺ keep or undo one file, or all of them from the section's title.
 - Changed lines are highlighted. Removed lines show as a faded "− was: …" note at the end of the line; hover over it to see the old lines.
 - **Restore checkpoint** on any reply puts back the files changed since that point and makes Claude forget everything after it. This also covers files changed by commands (`sed`, scripts and so on) in a git repo.
 - **Redo** brings a restore back, one step at a time.
@@ -138,7 +156,7 @@ Then reload the window.
 
 ### Browser
 
-Set **`clawd.browser`** to `window` or `headless` and Claude gets its own Chrome to test your app: open a page, read it, click, type, press keys, take screenshots and check the console. In headless mode a **Claude's Browser** tab opens beside the chat with a live view you can click, scroll and type into; run **Clawd: Show Claude's Browser** to open it in window mode too. Each chat gets a throwaway profile that's deleted when it ends, unless you turn on **`clawd.browserKeepLogins`**: then logins stay in a Clawd-only Chrome profile (not your own). Reading the page, screenshots and the console never ask; opening, clicking and typing follow your approval policy. Needs Chrome, Chromium or Edge installed.
+Turn on **Browser tools** in the model menu (or set **`clawd.browser`** to `window` or `headless`) and Claude gets its own Chrome to test your app: open a page, read it, click, type, press keys, take screenshots and check the console. In headless mode a **Claude's Browser** tab opens beside the chat with a live view you can click, scroll and type into; run **Clawd: Show Claude's Browser** to open it in window mode too. Each chat gets a throwaway profile that's deleted when it ends, unless you turn on **`clawd.browserKeepLogins`**: then logins stay in a Clawd-only Chrome profile (not your own). Reading the page, screenshots and the console never ask; opening, clicking and typing follow your approval policy. Needs Chrome, Chromium or Edge installed.
 
 ### Git
 
@@ -164,6 +182,10 @@ Set **`clawd.browser`** to `window` or `headless` and Claude gets its own Chrome
 | `clawd.defaultPolicy` | `review` | Approval policy for new chats: `review`, `ask` or `bypass` |
 | `clawd.browser` | `off` | Browser tools for Claude: `off`, `window` (a visible Chrome) or `headless` |
 | `clawd.browserKeepLogins` | `false` | Keep the browser's logins between chats |
+| `clawd.autoCompactAt` | `500000` | When a long chat compacts on its own: 150k–500k tokens, Claude Code's default (near the model's limit), or off |
+| `clawd.fallbackModel` | `sonnet` | Model a reply goes on with when the chat's model is overloaded or unavailable (or off) |
+| `clawd.diagnostics` | `true` | After each edit, send the errors VS Code reports in that file back to Claude so it can fix them |
+| `clawd.pollUsage` | `false` | Also refresh plan usage every 2 minutes by asking Anthropic directly with Claude Code's saved login. Off: usage updates with each reply |
 
 All of them are machine-scoped on purpose: a folder's `.vscode/settings.json` can't change which binary Clawd launches or turn approvals off. Clawd also stays off in Restricted Mode until you trust the folder.
 

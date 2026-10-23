@@ -5,7 +5,12 @@
   "version": "1.0.3",
   "publisher": "prince-terabits",
   "repository": { "type": "git", "url": "https://github.com/prince-terabits/clawd.git" },
+  "bugs": { "url": "https://github.com/prince-terabits/clawd/issues" },
+  "homepage": "https://github.com/prince-terabits/clawd#readme",
   "license": "MIT",
+  "categories": ["AI", "Chat", "Programming Languages", "Other"],
+  "keywords": ["claude", "claude code", "anthropic", "agent", "ai", "copilot", "chat", "coding assistant", "mcp"],
+  "galleryBanner": { "color": "#161A21", "theme": "dark" },
   "engines": {
     "vscode": "^1.94.0"
   },
@@ -443,6 +448,12 @@
           "default": true,
           "scope": "machine",
           "description": "After each edit, send the errors VS Code reports in that file (Problems panel) back to Claude so it can fix them. Each edit waits up to 1.5 s for the language server."
+        },
+        "clawd.pollUsage": {
+          "type": "boolean",
+          "default": false,
+          "scope": "machine",
+          "markdownDescription": "Also refresh your plan usage every 2 minutes by asking Anthropic directly, with the login Claude Code saved in `~/.claude`. Off: usage updates only from Claude Code itself, each time a reply comes back, so other sessions' use shows up after your next message."
         },
         "clawd.fallbackModel": {
           "type": "string",

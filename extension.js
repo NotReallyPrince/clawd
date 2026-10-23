@@ -1308,7 +1308,7 @@ class ChatProvider {
   // An editor-tab chat's webview loaded: settings, then the conversation from its transcript.
   panelReady(c) {
     c.panel.webview.postMessage({ type: "settings", ...c.settings() });
-    c.panel.webview.postMessage({ type: "usage", usage: this.usage, plan: this.plan });
+    c.panel.webview.postMessage({ type: "usage", usage: this.usage, plan: this.plan, poll: !!vscode.workspace.getConfiguration("clawd").get("pollUsage") });
     if (this.info) c.panel.webview.postMessage({ type: "init", ...this.info });
     c.panel.webview.postMessage({ type: "chats", chats: [{ key: c.key, title: c.title }], active: c.key });
     if (this.folder) c.panel.webview.postMessage(this.sessionsMsg());
@@ -1379,7 +1379,7 @@ class ChatProvider {
       case "openInEditor": return this.openInEditor(c);
       case "ready":
         this.active.postSettings();
-        this.post({ type: "usage", usage: this.usage, plan: this.plan });
+        this.post({ type: "usage", usage: this.usage, plan: this.plan, poll: !!vscode.workspace.getConfiguration("clawd").get("pollUsage") });
         if (this.usageRequested) { this.usageRequested = false; this.post({ type: "showUsage" }); }
         if (this.info) this.post({ type: "init", ...this.info });
         this.post({ type: "chats", chats: [...this.chats.values()].filter((x) => !x.panel).map((x) => ({ key: x.key, title: x.title })), active: this.active.key });
@@ -1658,8 +1658,9 @@ class ChatProvider {
   // ---- plan usage: the CLI's rate_limit_event while chatting, plus a poll of the account's usage endpoint ----
   // Other Claude sessions (terminal, other windows) use the same limits, so the reading from our last message goes stale.
 
+  // Opt-in (clawd.pollUsage): it's the one request Clawd makes itself, with the login Claude Code saved.
   async fetchUsage(force = false) {
-    if (this.fetchingUsage || (!force && this.usage?.updated > Date.now() - USAGE_POLL / 2)) return;
+    if (!vscode.workspace.getConfiguration("clawd").get("pollUsage") || this.fetchingUsage ||(!force && this.usage?.updated > Date.now() - USAGE_POLL / 2)) return;
     this.fetchingUsage = true;
     try {
       const dir = process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), ".claude");
@@ -1705,7 +1706,7 @@ class ChatProvider {
   }
 
   updateUsage() {
-    this.post({ type: "usage", usage: this.usage, plan: this.plan });
+    this.post({ type: "usage", usage: this.usage, plan: this.plan, poll: !!vscode.workspace.getConfiguration("clawd").get("pollUsage") });
     const item = this.statusItem;
     if (!item) return;
     const pct = (x) => (x?.used == null ? null : Math.round(x.used * 100));
@@ -2680,8 +2681,10 @@ function activate(context) {
   context.subscriptions.push({ dispose: () => clearInterval(poll) });
   if (vscode.window.onDidChangeWindowState) context.subscriptions.push(vscode.window.onDidChangeWindowState((s) => s.focused && provider.fetchUsage()));
   context.subscriptions.push(status, vscode.commands.registerCommand("clawd.showUsage", () => provider.showUsage()));
-  if (vscode.workspace.onDidChangeConfiguration) context.subscriptions.push(vscode.workspace.onDidChangeConfiguration((e) => e.affectsConfiguration("clawd.browser")
-    && new Set([provider.active, ...provider.chats.values()]).forEach((c) => c?.postSettings()))); // the switch follows Settings
+  if (vscode.workspace.onDidChangeConfiguration) context.subscriptions.push(vscode.workspace.onDidChangeConfiguration((e) => {
+    if (e.affectsConfiguration("clawd.browser")) new Set([provider.active, ...provider.chats.values()]).forEach((c) => c?.postSettings()); // the switch follows Settings
+    if (e.affectsConfiguration("clawd.pollUsage")) { provider.updateUsage(); provider.fetchUsage(true); } // the usage card's footer, and a first reading
+  }));
   const work = vscode.window.createStatusBarItem("clawd.work", vscode.StatusBarAlignment.Right, 101);
   work.name = "Clawd Activity";
   work.command = "clawd.showWorking";

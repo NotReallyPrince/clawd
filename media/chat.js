@@ -1328,8 +1328,9 @@ function renderUsage() {
       h("button", { class: "primary small", onclick: () => send({ type: "openUsagePage" }) }, "Manage"),
       h("button", { class: "icon-btn", title: "Close", onclick: () => usageCard.classList.add("hidden") }, icon("close"))),
     ...rows,
-    h("div", { class: "usage-foot muted small" }, icon("info"), h("span", { class: "grow" }, u?.updated ? `Updated ${ago(u.updated)} · refreshes every 2 min` : "Refreshes every 2 min"),
-      h("button", { class: "icon-btn", title: "Refresh now", onclick: () => send({ type: "refreshUsage" }) }, icon("refresh"))));
+    // without clawd.pollUsage the only source is Claude Code's own reading, which comes with each reply
+    h("div", { class: "usage-foot muted small" }, icon("info"), h("span", { class: "grow" }, [u?.updated && `Updated ${ago(u.updated)}`, S.pollUsage ? "refreshes every 2 min" : "updates with each reply"].filter(Boolean).join(" · ")),
+      S.pollUsage && h("button", { class: "icon-btn", title: "Refresh now", onclick: () => send({ type: "refreshUsage" }) }, icon("refresh"))));
 }
 setInterval(() => { if (!usageCard.classList.contains("hidden")) renderUsage(); }, 30000); // keep "Updated … ago" honest while open
 
@@ -1521,7 +1522,7 @@ function handle(m) {
     case "agentProgress": { const row = stepRow(m.toolUseId); if (row && m.text) row.title = m.text; return; }
     case "settings": Object.assign(S, { model: m.model, effort: m.effort, ultracode: m.ultracode, browser: m.browser, mode: m.mode, policy: m.policy, agents: m.agents || [] }); return renderToolbar();
     case "init": S.models = m.models; S.commands = m.commands; return renderToolbar();
-    case "usage": S.usage = m.usage; S.plan = m.plan; return renderUsage();
+    case "usage": S.usage = m.usage; S.plan = m.plan; S.pollUsage = m.poll; return renderUsage();
     case "showUsage": renderUsage(); usageCard.classList.toggle("hidden"); return;
     case "activeFile": S.active = m.file; return renderChips();
     case "addContext": return addItems(m.items);

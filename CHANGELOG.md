@@ -6,6 +6,10 @@
   there is nothing to edit, retry or undo. The "Conversation compacted" notice stays.
 - **Fix:** a chat no longer disappears from history after Undo, Restore or a compaction makes a new copy that has
   no message of its own yet. The chat stays listed, and its pin stays put, until you send something in the copy.
+- **Usage polling is opt-in:** Clawd no longer asks Anthropic for your plan usage on its own. The status bar and usage
+  card update from Claude Code with each reply. Turn on `clawd.pollUsage` to also refresh every 2 minutes, as before.
+- **Marketplace ready:** categories, keywords and links for the listing, an updated README (install from the
+  Marketplace, every setting, new screenshots), and a smaller package without the README images.
 - **Agent Changes view:** files waiting for Keep or Undo now show in their own "Agent Changes" section of the
   Source Control sidebar, with each file's folder and +/− counts, instead of as a "Clawd" repository among your git
   repos. Keep or Undo a file inline, or all of them from the section's title (Undo All asks first).
