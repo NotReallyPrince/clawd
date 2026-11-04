@@ -49,7 +49,7 @@ If `claude` is not on your `PATH`, set **Settings → Clawd → Claude Path** to
 Needs Node.js to build the `.vsix`:
 
 ```bash
-git clone https://github.com/prince-terabits/clawd.git
+git clone https://github.com/notreallyprince/clawd.git
 cd clawd
 npx --yes @vscode/vsce package
 code --install-extension clawd-*.vsix --force
