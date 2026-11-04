@@ -1314,7 +1314,10 @@ function meter(title, sub, w) {
 function renderUsage() {
   const u = S.usage;
   const rows = [];
-  if (!u || (!u.session && !u.weekly)) {
+  const skRow = () => h("div", { class: "usage-row usage-sk" }, h("div", { class: "sk-line" }), h("div", { class: "sk-line" }), h("div", { class: "sk-line" }));
+  if (S.usageLoading) {
+    rows.push(skRow(), skRow());
+  } else if (!u || (!u.session && !u.weekly)) {
     rows.push(h("div", { class: "usage-empty muted" }, icon("pulse"), "No usage data yet. Send a message and your limits appear here."));
   } else {
     if (u.status === "rejected") rows.push(h("div", { class: "usage-alert" }, icon("warning"), `Limit reached. ${resetText(u.resetsAt)}${u.resetsAt ? " (" + untilText(u.resetsAt) + ")" : ""}.`));
@@ -1329,8 +1332,10 @@ function renderUsage() {
       h("button", { class: "icon-btn", title: "Close", onclick: () => usageCard.classList.add("hidden") }, icon("close"))),
     ...rows,
     // without clawd.pollUsage the only source is Claude Code's own reading, which comes with each reply
-    h("div", { class: "usage-foot muted small" }, icon("info"), h("span", { class: "grow" }, [u?.updated && `Updated ${ago(u.updated)}`, S.pollUsage ? "refreshes every 2 min" : "updates with each reply"].filter(Boolean).join(" · ")),
-      S.pollUsage && h("button", { class: "icon-btn", title: "Refresh now", onclick: () => send({ type: "refreshUsage" }) }, icon("refresh"))));
+    h("div", { class: "usage-foot muted small" }, icon("info"), h("span", { class: "grow" }, S.usageLoading ? "Loading your usage…"
+      : [u?.updated && `Updated ${ago(u.updated)}`, S.pollUsage ? "refreshes every 2 min" : "updates with each reply"].filter(Boolean).join(" · ")),
+      h("button", { class: "icon-btn", title: S.pollUsage ? "Refresh now" : "Refresh now (asks Anthropic once, with Claude Code's login)", disabled: S.usageLoading || undefined,
+        onclick: () => send({ type: "refreshUsage" }) }, icon("refresh", S.usageLoading ? "spin" : ""))));
 }
 setInterval(() => { if (!usageCard.classList.contains("hidden")) renderUsage(); }, 30000); // keep "Updated … ago" honest while open
 
@@ -1524,6 +1529,7 @@ function handle(m) {
     case "init": S.models = m.models; S.commands = m.commands; return renderToolbar();
     case "usage": S.usage = m.usage; S.plan = m.plan; S.pollUsage = m.poll; return renderUsage();
     case "showUsage": renderUsage(); usageCard.classList.toggle("hidden"); return;
+    case "usageLoading": S.usageLoading = m.on; return renderUsage();
     case "activeFile": S.active = m.file; return renderChips();
     case "addContext": return addItems(m.items);
     case "quickAction": { // Explain / Fix / Tests or a code block's Apply: sent as is, the draft in the input stays

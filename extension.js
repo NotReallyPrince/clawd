@@ -216,7 +216,8 @@ class Chat {
 
   get busy() { return this._busy; }
   set busy(v) { this._busy = v; this.p.updateWork(); } // the status bar's "Working"
-  get folder() { return this.p.folder; }
+  // cwd: a chat continued from a terminal Claude in another folder runs, and is saved, there
+  get folder() { return this.cwd || this.p.folder; }
   get edits() { return this.p.edits; }
   rel(file) { return this.p.rel(file); }
   settings() { return { ...this.p.settings(), ...this.prefs() }; }
@@ -232,7 +233,7 @@ class Chat {
     if (this.sessionId && this._prefs) this.p.ws.update("chatPrefs", { ...this.p.ws.get("chatPrefs"), [this.sessionId]: this._prefs });
   }
   postSettings() { if (this.panel || this === this.p.active) this.post({ type: "settings", ...this.settings() }); } // the webview shows one chat's
-  sessionDir() { return this.p.sessionDir(); }
+  sessionDir() { return this.p.sessionDir(this.folder); }
   post(msg) { this.tap?.(msg); this.p.post({ ...msg, chat: this.key }); } // tap: @clawd in Copilot's chat panel
   get fresh() { return !this.sessionId && !this.busy && !this.checkpoints.length; }
 
@@ -298,6 +299,7 @@ class Chat {
   reset() {
     this.shutdown();
     this.sessionId = null;
+    this.cwd = null;
     this.resumeAt = null;
     this.busy = false;
     this.checkpoints = [];
@@ -873,10 +875,11 @@ class Chat {
   // ---- history ----
 
   // Async: a long chat takes a while to read and render, so the loading screen goes out first.
-  async loadSession(id) {
+  async loadSession(id, cwd = null) {
     this.shutdown();
     this.older = null;
     this.sessionId = id;
+    this.cwd = cwd && cwd !== this.p.folder ? cwd : null;
     this.resumeAt = null;
     this.allowEdits = false; // "Allow all edits" was for the conversation that was here
     this.busy = false;
@@ -1067,7 +1070,8 @@ class ChatProvider {
     const list = [...this.chats.values()].filter((c) => c.sessionId && !c.panel); // editor tabs come back through their serializer
     const queues = {};
     for (const c of list) if (c.queue.length) queues[c.sessionId] = c.queue.map(({ text, items, chips, useActive }) => ({ text, items, chips, useActive, images: [] }));
-    this.ws.update("openChats", { ids: list.map((c) => c.sessionId), active: this.active.sessionId || null, queues });
+    const cwds = Object.fromEntries(list.filter((c) => c.cwd).map((c) => [c.sessionId, c.cwd]));
+    this.ws.update("openChats", { ids: list.map((c) => c.sessionId), active: this.active.sessionId || null, queues, cwds });
   }
 
   // The working tree's git state right now, without touching it: a stash-like commit of tracked files, plus untracked paths.
@@ -1162,11 +1166,11 @@ class ChatProvider {
     const saved = this.ws.get("openChats");
     if (this.restored || !saved?.ids?.length || [...this.chats.values()].some((c) => !c.panel && c !== this.active) || !this.active.fresh) return (this.restored = true);
     this.restored = true;
-    const ids = saved.ids.filter((id) => fs.existsSync(path.join(this.sessionDir(), id + ".jsonl")));
+    const ids = saved.ids.filter((id) => fs.existsSync(path.join(this.sessionDir(saved.cwds?.[id]), id + ".jsonl")));
     ids.forEach((id, i) => {
       const c = i ? this.createChat() : this.active;
       if (i) this.post({ type: "openChat", chat: c.key });
-      c.loadSession(id);
+      c.loadSession(id, saved.cwds?.[id]);
       c.queue = saved.queues?.[id] || [];
       if (c.queue.length) c.post({ type: "queue", items: c.queue });
     });
@@ -1438,7 +1442,7 @@ class ChatProvider {
       case "restore": return c.restore(m.checkpoint);
       case "editMessage": return c.restore(m.checkpoint, { edit: m.text, retry: m.retry });
       case "redo": return c.redo();
-      case "refreshUsage": return this.fetchUsage(true);
+      case "refreshUsage": return this.fetchUsage(true, true);
       case "openUsagePage": return vscode.env.openExternal(vscode.Uri.parse("https://claude.ai/settings/usage"));
     }
   }
@@ -1602,9 +1606,14 @@ class ChatProvider {
   }
 
   // A chat already open in a tab is shown; otherwise it opens in the current tab if that's empty, or a new one.
-  openSession(id, tab = null) {
+  openSession(id, tab = null, cwd = null) {
     const open = [...this.chats.values()].find((c) => c.sessionId === id);
     if (open) return open.panel ? open.panel.reveal() : this.switchTo(open);
+    if (cwd) { // from a terminal that's still running Claude on it
+      let c = this.active;
+      if (!c.fresh || c.busy) { c = this.createChat(); this.post({ type: "openChat", chat: c.key }); this.switchTo(c); }
+      return c.loadSession(id, cwd);
+    }
     // Written in the last minute, but not by this window: likely a Claude still running in a terminal on the same file.
     const s = this.session(id);
     if (s && Date.now() - s.time < 60000 && !this.seen?.has(id))
@@ -1620,9 +1629,18 @@ class ChatProvider {
     return c.loadSession(id);
   }
 
-  // A terminal session picked up here (right-click a terminal tab → Continue in Clawd).
-  // ponytail: the newest chat not open here, not necessarily that terminal's; match by terminal name if several run at once.
-  continueFromTerminal() {
+  // A terminal session picked up here (right-click a terminal tab → Continue in Clawd): the chat of the `claude` running
+  // in that terminal, from the ~/.claude/sessions/<pid>.json each one keeps, in whatever folder it was started.
+  async continueFromTerminal(term) {
+    const t = term?.processId ? term : vscode.window.activeTerminal;
+    const mine = terminalClaude(await t?.processId);
+    if (mine) {
+      if (!fs.existsSync(path.join(this.sessionDir(mine.cwd), mine.sessionId + ".jsonl")))
+        return vscode.window.showInformationMessage("Clawd: send a message in that terminal's Claude first; its chat isn't saved until then.");
+      await this.openSession(mine.sessionId, null, mine.cwd);
+      return vscode.window.showWarningMessage(`Clawd: this chat is still open in the "${t.name}" terminal. Exit Claude there (/exit) before replying here, or both write into the same chat.`);
+    }
+    // no Claude found in that terminal (or not on Linux/macOS): the newest chat for this folder that isn't open here
     const open = new Set([...this.chats.values()].map((c) => c.sessionId));
     const s = this.sessions(20).find((x) => !open.has(x.id));
     if (!s) return vscode.window.showInformationMessage("Clawd: no other chat in this folder to continue.");
@@ -1658,10 +1676,12 @@ class ChatProvider {
   // ---- plan usage: the CLI's rate_limit_event while chatting, plus a poll of the account's usage endpoint ----
   // Other Claude sessions (terminal, other windows) use the same limits, so the reading from our last message goes stale.
 
-  // Opt-in (clawd.pollUsage): it's the one request Clawd makes itself, with the login Claude Code saved.
-  async fetchUsage(force = false) {
-    if (!vscode.workspace.getConfiguration("clawd").get("pollUsage") || this.fetchingUsage ||(!force && this.usage?.updated > Date.now() - USAGE_POLL / 2)) return;
+  // Opt-in (clawd.pollUsage, or a click on the usage card's refresh button): it's the one request Clawd makes itself,
+  // with the login Claude Code saved.
+  async fetchUsage(force = false, clicked = false) {
+    if (!(clicked || vscode.workspace.getConfiguration("clawd").get("pollUsage")) || this.fetchingUsage || (!force && this.usage?.updated > Date.now() - USAGE_POLL / 2)) return;
     this.fetchingUsage = true;
+    this.post({ type: "usageLoading", on: true }); // the usage card's skeleton
     try {
       const dir = process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), ".claude");
       const auth = JSON.parse(fs.readFileSync(path.join(dir, ".credentials.json"), "utf8")).claudeAiOauth;
@@ -1687,7 +1707,7 @@ class ChatProvider {
       this.state.update("usage", this.usage);
       this.updateUsage();
     } catch {} // offline, no credentials file (e.g. macOS keychain): keep the last reading
-    finally { this.fetchingUsage = false; }
+    finally { this.fetchingUsage = false; this.post({ type: "usageLoading", on: false }); }
   }
 
   setUsage(info) {
@@ -1726,7 +1746,7 @@ class ChatProvider {
   }
 
   showUsage() {
-    this.fetchUsage();
+    this.fetchUsage(true, true); // opening the card is asking for the latest numbers
     if (this.view) { this.view.show?.(true); this.post({ type: "showUsage" }); }
     else this.usageRequested = true; // panel not open yet: show the card once it loads
     vscode.commands.executeCommand("clawd.chat.focus");
@@ -1842,8 +1862,8 @@ class ChatProvider {
 
   // ---- history (shared with the Claude Code CLI) ----
 
-  sessionDir() {
-    return path.join(os.homedir(), ".claude", "projects", (this.folder || "").replace(/[^a-zA-Z0-9]/g, "-"));
+  sessionDir(folder = this.folder) {
+    return path.join(os.homedir(), ".claude", "projects", (folder || "").replace(/[^a-zA-Z0-9]/g, "-"));
   }
 
   sessions(limit) {
@@ -2360,6 +2380,22 @@ function userText(entry) {
 }
 
 // Title from the tail (AI or custom title) or the first prompt.
+// The Claude Code CLI running under a terminal's shell (pid): its { sessionId, cwd } from ~/.claude/sessions/<pid>.json.
+function terminalClaude(shellPid) {
+  if (!shellPid || process.platform === "win32") return null;
+  const dir = path.join(process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), ".claude"), "sessions");
+  let kids;
+  try { kids = require("child_process").execFileSync("ps", ["-A", "-o", "pid=,ppid="], { encoding: "utf8" }).trim().split("\n").map((l) => l.trim().split(/\s+/).map(Number)); } catch { return null; }
+  for (let todo = [shellPid], seen = new Set(); todo.length;) { // breadth-first, so the shell's own claude wins over one it started
+    const pid = todo.shift();
+    if (seen.has(pid)) continue;
+    seen.add(pid);
+    try { const s = JSON.parse(fs.readFileSync(path.join(dir, pid + ".json"), "utf8")); if (s.sessionId && s.cwd) return s; } catch {}
+    todo.push(...kids.filter(([, pp]) => pp === pid).map(([p]) => p));
+  }
+  return null;
+}
+
 function sessionTitle(file) {
   let size;
   try { size = fs.statSync(file).size; } catch { return null; }
@@ -2718,7 +2754,7 @@ function activate(context) {
       const id = state?.sessionId && fs.existsSync(path.join(provider.sessionDir(), state.sessionId + ".jsonl")) ? state.sessionId : null; // deleted meanwhile: an empty chat
       provider.openTab(id, panel);
     } }),
-    vscode.commands.registerCommand("clawd.continueFromTerminal", () => provider.continueFromTerminal()),
+    vscode.commands.registerCommand("clawd.continueFromTerminal", (t) => provider.continueFromTerminal(t)),
     vscode.commands.registerCommand("clawd.addContext", () => provider.pickContext()),
     vscode.commands.registerCommand("clawd.addToChat", (uri, uris) => provider.addUris(uris?.length ? uris : uri ? [uri] : [])),
     vscode.commands.registerCommand("clawd.addSelection", () => provider.addSelection()),
@@ -2745,4 +2781,4 @@ function activate(context) {
   return provider;
 }
 
-module.exports = { activate, applyEdit, replay, sessionTitle, latestCopies, describeTool, parseUserText, editStats, lastUsage, searchSessions, chatMarkdown, git, riskyEdit, diffRows, pageStart, stepBefore };
+module.exports = { activate, applyEdit, replay, sessionTitle, latestCopies, terminalClaude, describeTool, parseUserText, editStats, lastUsage, searchSessions, chatMarkdown, git, riskyEdit, diffRows, pageStart, stepBefore };

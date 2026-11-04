@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.0.4
+
+- **Fix: Continue in Clawd opens that terminal's chat.** Right-clicking a terminal tab now finds the Claude running
+  in that terminal and opens its chat, even when it was started in another folder (after `cd`); the chat keeps
+  running in that folder. Before, it opened the newest chat for the workspace, which could be someone else's.
+- **Refresh usage any time:** the usage card's refresh button is always there, and fetches your usage once even
+  with `clawd.pollUsage` off. Opening the card from the status bar loads the latest numbers too, with a placeholder
+  while they load.
+
 ## 1.0.3
 
 - **Cleaner `/compact`:** a `/compact` message no longer shows the edit, retry or restore-checkpoint buttons, because

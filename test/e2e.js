@@ -146,6 +146,16 @@ assert.strictEqual(ext.riskyEdit(path.join(cwd, ".claude/settings.json"), true),
 assert.strictEqual(ext.riskyEdit(path.join(require("os").homedir(), ".bashrc"), false), true);
 assert.strictEqual(ext.riskyEdit(path.join(require("os").homedir(), "notes.txt"), false), true); // outside the workspace
 assert.strictEqual(ext.riskyEdit(path.join(cwd, ".gitignore"), true), false); // not inside .git/
+{ // a terminal's Claude: this process stands in for it, found from its parent ("the shell") through ~/.claude/sessions
+  const cfg = fs.mkdtempSync(path.join(require("os").tmpdir(), "clawd-sess-")), old = process.env.CLAUDE_CONFIG_DIR;
+  fs.mkdirSync(path.join(cfg, "sessions"));
+  fs.writeFileSync(path.join(cfg, "sessions", process.pid + ".json"), JSON.stringify({ pid: process.pid, sessionId: "s-1", cwd: "/elsewhere/portfolio" }));
+  process.env.CLAUDE_CONFIG_DIR = cfg;
+  if (process.platform !== "win32") assert.deepStrictEqual(ext.terminalClaude(process.ppid), { pid: process.pid, sessionId: "s-1", cwd: "/elsewhere/portfolio" });
+  assert.strictEqual(ext.terminalClaude(null), null);
+  if (old == null) delete process.env.CLAUDE_CONFIG_DIR; else process.env.CLAUDE_CONFIG_DIR = old;
+  fs.rmSync(cfg, { recursive: true });
+}
 console.log("pure checks ok");
 
 // ---------- live checks ----------
@@ -291,11 +301,11 @@ const said = (p) => p.filter((m) => m.type === "text").map((m) => m.text).join("
     write(br[1], line({ uuid: "u5", message: { content: "branch me" } }) + line({ uuid: "u7", message: { content: "from Clawd" } }), now + 50);
     const both = provider.sessions(60).filter((s) => br.includes(s.id));
     assert.deepStrictEqual(both.map((s) => [s.id, s.title, s.note]), [[br[0], "branch me", "from the terminal"], [br[1], "branch me", "from Clawd"]], "both branches listed, told apart by their last prompt");
-    // Continue in Clawd: the newest chat not already open here
+    // Continue in Clawd, with no Claude found in the terminal: the newest chat not already open here
     const realOpen = provider.openSession;
     let opened;
     provider.openSession = (id) => (opened = id);
-    provider.continueFromTerminal();
+    await provider.continueFromTerminal();
     provider.openSession = realOpen;
     assert.strictEqual(opened, br[0]);
     for (const id of [...ids, ...br]) fs.rmSync(path.join(dir, id + ".jsonl"));
@@ -453,6 +463,9 @@ const said = (p) => p.filter((m) => m.type === "text").map((m) => m.text).join("
       five_hour: { utilization: 81, resets_at: "2026-10-05T09:20:00+00:00" }, seven_day: { utilization: 100, resets_at: "2026-10-09T19:00:00+00:00" }, extra_usage: { is_enabled: false } }) }; };
     await provider.fetchUsage(true);
     assert.strictEqual(calls.length, 0, "no request unless clawd.pollUsage is on");
+    await provider.fetchUsage(true, true); // ...or the refresh button is clicked
+    assert.strictEqual(calls.length, 1, "the refresh button asks once");
+    calls.length = 0;
     vscode.workspace.getConfiguration = () => ({ get: (k) => (k === "pollUsage" ? true : usageCfg().get(k)) });
     await provider.fetchUsage(true);
     await provider.fetchUsage(); // just updated: no second request
